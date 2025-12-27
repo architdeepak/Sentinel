@@ -97,6 +97,10 @@ while cap.isOpened():
     head_down = False
     head_roll = False
 
+    # Ensure variables exist even when no face is detected
+    ear = 0.0
+    mar = 0.0
+
     if results.multi_face_landmarks:
         lm = results.multi_face_landmarks[0].landmark
         landmarks = [(int(p.x * w), int(p.y * h)) for p in lm]
