@@ -11,11 +11,17 @@ import time
 # LIST YOUR MODELS HERE - Add/remove as needed!
 # ============================================
 MODELS_TO_TEST = [
-    "granite3-moe:1b",
+    "tinyllama:latest",
+    "qwen3:0.6b",
+    "gemma2:2b",
+    "phi4-mini:latest",
+    "qwen3:4b",
+    "qwen:1.8b",
     "qwen2.5:0.5b",
     "qwen:4b",
-    "phi4-mini",
-    "gemma2:2b",
+    "granite3-moe:1b",
+    "qwen:0.5b",
+
     # "tinyllama",
     # "llama3.2:1b",
 ]
