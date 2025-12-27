@@ -5,3 +5,6 @@ ollama
 pyttsx3
 SpeechRecognition 
 pyaudio
+vosk
+piper-tts 
+llama-cpp-python
