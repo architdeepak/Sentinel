@@ -177,105 +177,41 @@ class STTEngine:
             self.model = None
             self.cleanup()
     
-    def listen(self, timeout=None):
+    def listen(self):
         """
-        Listen for speech and return transcribed text.
-        More lenient - accumulates text and waits for complete phrases.
-        
-        Args:
-            timeout: Listening timeout in seconds (default: Config.STT_TIMEOUT)
-        
-        Returns:
-            str: Transcribed text, or None if no speech detected
+        Blocking listen until user finishes speaking.
+        Returns recognized text or None.
         """
         if not self.model:
             print("⚠️ STT not available")
             return None
+
+        print("\n🎤 Listening... (start speaking)")
         
-        if timeout is None:
-            timeout = Config.STT_TIMEOUT
-        
-        print(f"\n🎤 Listening... (you have {timeout} seconds)")
-        print("   Speak clearly into your microphone")
-        
-        start_time = time.time()
-        accumulated_text = []  # Collect all text chunks
-        has_partial = False  # Track if we've seen any partial results
-        last_speech_time = start_time
-        silence_grace = 2.0  # Give 2 seconds after last partial before giving up
-        
+        self.recognizer.Reset()
+
         try:
-            # Calculate number of iterations based on timeout
-            iterations = int(Config.VOSK_SAMPLE_RATE / Config.VOSK_BUFFER_SIZE * timeout)
-            
-            for i in range(iterations):
-                # Read audio data
-                data = self.stream.read(Config.VOSK_BUFFER_SIZE, exception_on_overflow=False)
-                
-                # Check for partial results (indicates speech is happening)
-                partial = json.loads(self.recognizer.PartialResult())
-                partial_text = partial.get('partial', '')
-                if partial_text:
-                    has_partial = True
-                    last_speech_time = time.time()
-                
-                # Process audio
+            while True:
+                data = self.stream.read(
+                    Config.VOSK_BUFFER_SIZE,
+                    exception_on_overflow=False
+                )
+
                 if self.recognizer.AcceptWaveform(data):
                     result = json.loads(self.recognizer.Result())
-                    text = result.get('text', '').strip()
-                    
-                    # Accumulate ANY text (even if short)
+                    text = result.get("text", "").strip()
+
                     if text:
-                        accumulated_text.append(text)
-                        last_speech_time = time.time()
-                        print(f"  [Captured: '{text}']")
-                
-                # If we've seen speech but now have silence for too long, finish
-                if has_partial and (time.time() - last_speech_time > silence_grace):
-                    print("  [Detected end of speech]")
-                    break
-            
-            # Get any final result
-            final_result = json.loads(self.recognizer.FinalResult())
-            final_text = final_result.get('text', '').strip()
-            if final_text and final_text not in accumulated_text:
-                accumulated_text.append(final_text)
-            
-            # Combine all accumulated text
-            full_text = ' '.join(accumulated_text).strip()
-            
-            if full_text:
-                elapsed = time.time() - start_time
-                print(f"✓ You said: '{full_text}'")
-                print(f"✓ Recognition time: {elapsed:.2f}s")
-                return full_text
-            
-            # No speech detected
-            elapsed = time.time() - start_time
-            if has_partial:
-                print(f"⏱️ Heard speech but couldn't understand (after {elapsed:.1f}s)")
-            else:
-                print(f"⏱️ No speech detected (after {elapsed:.1f}s)")
-            return None
-            
+                        print(f"✓ You said: '{text}'")
+                        return text
+                    else:
+                        print("⚠️ Speech detected but no text")
+                        return None
+
         except Exception as e:
-            print(f"⚠️ Listening error: {e}")
+            print(f"⚠️ STT error: {e}")
             return None
-    
-    def cleanup(self):
-        """Cleanup audio resources."""
-        try:
-            if self.stream:
-                self.stream.stop_stream()
-                self.stream.close()
-        except:
-            pass
-        
-        try:
-            if self.mic:
-                self.mic.terminate()
-        except:
-            pass
+
 
 # =========================
 # LLM ASSISTANT (llama.cpp)
