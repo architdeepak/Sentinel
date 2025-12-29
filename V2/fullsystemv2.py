@@ -3,11 +3,7 @@
 Driver Drowsiness Detection System V2
 Optimized for Raspberry Pi 4B
 
-Changes from V1:
-- llama.cpp with Granite model (replaced ollama)
-- espeak-ng for TTS (replaced pyttsx3)
-- Vosk for STT (using proven working logic)
-- Performance optimizations for RPi
+FIXED: Stream restart before listening (audio stream goes stale during camera operation)
 """
 
 import cv2
@@ -32,7 +28,7 @@ class Config:
     LLM_MODEL_PATH = Path.home() / "Sentinel" / "modls" / "granite-3.0-1b-a400m-instruct.Q4_K_M.gguf"
     VOSK_MODEL_PATH = Path.home() / "Sentinel" / "Sentinel" / "vosk-model-small-en-us-0.15"
     
-    # LLM settings (no hard limits - use prompting instead)
+    # LLM settings
     LLM_THREADS = 3
     LLM_CONTEXT = 2048
     LLM_MAX_TOKENS = 150
@@ -41,10 +37,7 @@ class Config:
     ESPEAK_SPEED = 165
     ESPEAK_VOICE = "en-us"
     VOSK_SAMPLE_RATE = 16000
-    VOSK_BUFFER_SIZE = 8192  # Using working value from test script
-    
-    # STT settings
-    STT_TIMEOUT = 20  # 20 second listening window
+    VOSK_BUFFER_SIZE = 8192
     
     # Camera settings (RPi optimization)
     CAMERA_WIDTH = 480
@@ -77,10 +70,10 @@ CHIN = 152
 MOUTH_LANDMARKS = [13, 14, 61, 291]
 
 # =========================
-# TEXT-TO-SPEECH (espeak-ng)
+# TEXT-TO-SPEECH
 # =========================
 class TTSEngine:
-    """Clean TTS using espeak-ng with queue-based playback."""
+    """Simple TTS using espeak-ng."""
     
     def __init__(self):
         self.audio_queue = queue.Queue()
@@ -89,7 +82,7 @@ class TTSEngine:
         self.is_speaking = False
     
     def _audio_worker(self):
-        """Plays sentences one at a time - NO overlap."""
+        """Process TTS queue."""
         while True:
             sentence = self.audio_queue.get()
             if sentence is None:
@@ -107,7 +100,7 @@ class TTSEngine:
             self.audio_queue.task_done()
     
     def speak(self, text):
-        """Add text to speaking queue."""
+        """Queue text for speech."""
         if text and text.strip():
             self.audio_queue.put(text.strip())
     
@@ -116,14 +109,14 @@ class TTSEngine:
         self.audio_queue.join()
     
     def shutdown(self):
-        """Shutdown the TTS engine."""
+        """Shutdown TTS."""
         self.audio_queue.put(None)
 
 # =========================
-# SPEECH-TO-TEXT (Vosk)
+# SPEECH-TO-TEXT - EXACT WORKING VERSION FROM TEST
 # =========================
 class STTEngine:
-    """Vosk-based speech recognition using proven working logic."""
+    """Vosk STT - PROVEN WORKING VERSION."""
     
     def __init__(self):
         self.model = None
@@ -133,34 +126,28 @@ class STTEngine:
         self._initialize()
     
     def _initialize(self):
-        """Initialize Vosk model and microphone."""
+        """Initialize Vosk."""
         try:
-            # Check model exists
             if not Config.VOSK_MODEL_PATH.exists():
                 print(f"❌ Vosk model not found: {Config.VOSK_MODEL_PATH}")
-                print("   Download model to continue")
                 return
             
-            print(f"✓ Vosk model found: {Config.VOSK_MODEL_PATH}")
-            
-            # Load model
+            print(f"✓ Vosk model found")
             print("📦 Loading Vosk model...")
             self.model = Model(str(Config.VOSK_MODEL_PATH))
             self.recognizer = KaldiRecognizer(self.model, Config.VOSK_SAMPLE_RATE)
-            print("✓ Vosk model loaded")
+            print("✓ Vosk loaded")
             
-            # Setup microphone
             print("🎤 Setting up microphone...")
             self.mic = pyaudio.PyAudio()
             
-            # List available microphones
+            # List mics (optional, can comment out if too verbose)
             print("\nAvailable microphones:")
             for i in range(self.mic.get_device_count()):
                 info = self.mic.get_device_info_by_index(i)
                 if info['maxInputChannels'] > 0:
                     print(f"  {i}: {info['name']}")
             
-            # Open stream with exact settings from working test script
             self.stream = self.mic.open(
                 format=pyaudio.paInt16,
                 channels=1,
@@ -169,55 +156,158 @@ class STTEngine:
                 frames_per_buffer=Config.VOSK_BUFFER_SIZE
             )
             self.stream.start_stream()
-            print("✓ Microphone ready")
-            print("✓ STT Engine initialized successfully\n")
+            print("✓ Microphone ready\n")
             
         except Exception as e:
-            print(f"⚠️ STT initialization failed: {e}")
+            print(f"⚠️ STT init failed: {e}")
             self.model = None
-            self.cleanup()
     
-    def listen(self):
+    def _restart_stream(self):
+        """Restart audio stream to ensure it's fresh."""
+        try:
+            if self.stream:
+                self.stream.stop_stream()
+                self.stream.close()
+            
+            # Reopen stream
+            self.stream = self.mic.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=Config.VOSK_SAMPLE_RATE,
+                input=True,
+                frames_per_buffer=Config.VOSK_BUFFER_SIZE
+            )
+            self.stream.start_stream()
+            
+            # Clear any initial buffer
+            for _ in range(10):  # Clear more buffers
+                self.stream.read(Config.VOSK_BUFFER_SIZE, exception_on_overflow=False)
+        except Exception as e:
+            print(f"⚠️ Stream restart error: {e}")
+    
+    def _clear_buffer(self):
+        """Clear audio buffer."""
+        if not self.stream:
+            return
+        try:
+            for _ in range(10):  # Increased from 5 to 10
+                self.stream.read(Config.VOSK_BUFFER_SIZE, exception_on_overflow=False)
+        except:
+            pass
+    
+    def listen(self, timeout=20, show_diagnostics=False):
         """
-        Blocking listen until user finishes speaking.
-        Returns recognized text or None.
+        Listen with timeout - EXACT WORKING VERSION + stream restart.
+        
+        Args:
+            timeout: Max seconds to listen
+            show_diagnostics: Show progress dots (set False during driving)
         """
         if not self.model:
             print("⚠️ STT not available")
             return None
 
-        print("\n🎤 Listening... (start speaking)")
+        print(f"\n🎤 Listening (timeout: {timeout}s)...")
+        if show_diagnostics:
+            print("   [Progress dots will appear]")
         
+        # CRITICAL: Restart stream to ensure it's fresh
+        print("   [Restarting audio stream...]")
+        self._restart_stream()
+        
+        # Clear buffer (extra clearing after restart)
+        self._clear_buffer()
+        
+        # Reset recognizer
         self.recognizer.Reset()
-
+        
+        start_time = time.time()
+        collected_text = []
+        last_text_time = None
+        chunks_processed = 0
+        
+        iterations_per_second = Config.VOSK_SAMPLE_RATE / Config.VOSK_BUFFER_SIZE
+        max_iterations = int(timeout * iterations_per_second)
+        
+        print("   [Ready - speak now!]")
+        
         try:
-            while True:
+            for iteration in range(max_iterations):
+                elapsed = time.time() - start_time
+                
+                # Diagnostic: show progress
+                if show_diagnostics and iteration % 10 == 0:
+                    print(".", end="", flush=True)
+                
+                # Read audio
                 data = self.stream.read(
                     Config.VOSK_BUFFER_SIZE,
                     exception_on_overflow=False
                 )
-
+                chunks_processed += 1
+                
+                # Process
                 if self.recognizer.AcceptWaveform(data):
                     result = json.loads(self.recognizer.Result())
                     text = result.get("text", "").strip()
-
+                    
                     if text:
-                        print(f"✓ You said: '{text}'")
-                        return text
-                    else:
-                        print("⚠️ Speech detected but no text")
-                        return None
-
+                        collected_text.append(text)
+                        last_text_time = time.time()
+                        print(f"\n   Heard: '{text}'")
+                        if show_diagnostics:
+                            print("   [Continuing...]")
+                
+                # Silence detection - only after we've heard something
+                if last_text_time:
+                    silence_duration = time.time() - last_text_time
+                    if silence_duration > 2.0:
+                        if show_diagnostics:
+                            print(f"\n   [2s silence - ending, chunks: {chunks_processed}]")
+                        break
+                
+                # Timeout check
+                if elapsed > timeout:
+                    if show_diagnostics:
+                        print(f"\n   [Timeout, chunks: {chunks_processed}]")
+                    break
+            
+            # Final result
+            final_result = json.loads(self.recognizer.FinalResult())
+            final_text = final_result.get("text", "").strip()
+            if final_text:
+                collected_text.append(final_text)
+                print(f"   Final: '{final_text}'")
+            
+            full_text = " ".join(collected_text).strip()
+            
+            if full_text:
+                print(f"✓ You said: '{full_text}'")
+                return full_text
+            else:
+                print(f"⚠️  No speech recognized (processed {chunks_processed} chunks)")
+                return None
+                
         except Exception as e:
-            print(f"⚠️ STT error: {e}")
+            print(f"\n⚠️ Error: {e}")
             return None
-
+    
+    def cleanup(self):
+        """Cleanup."""
+        try:
+            if self.stream:
+                self.stream.stop_stream()
+                self.stream.close()
+            if self.mic:
+                self.mic.terminate()
+        except:
+            pass
 
 # =========================
-# LLM ASSISTANT (llama.cpp)
+# LLM ASSISTANT
 # =========================
 class LLMAssistant:
-    """Streaming LLM assistant with espeak-ng TTS."""
+    """LLM with streaming TTS."""
     
     def __init__(self, tts_engine):
         self.tts = tts_engine
@@ -597,7 +687,7 @@ def run_detection_loop(cap, face_mesh, state):
     return False
 
 # =========================
-# LLM CONVERSATION
+# LLM CONVERSATION - USING EXACT WORKING LOGIC
 # =========================
 def run_llm_conversation(tts, stt, llm_assistant):
     """Run interactive voice conversation with LLM."""
@@ -615,30 +705,41 @@ def run_llm_conversation(tts, stt, llm_assistant):
     turn = 0
     
     while turn < max_turns:
-        # Listen with 20 second timeout
-        user_input = stt.listen()
+        turn += 1
+        print(f"\n--- Turn {turn}/{max_turns} ---")
+        
+        # Listen using EXACT working logic (diagnostics ON for debugging)
+        user_input = stt.listen(timeout=20, show_diagnostics=True)
         
         if user_input is None:
-            tts.speak("Are you still there?")
+            print("⚠️ No input detected")
+            tts.speak("I didn't hear anything. Are you still there?")
             tts.wait_until_done()
-            user_input = stt.listen()
+            
+            # Give one more chance
+            user_input = stt.listen(timeout=10, show_diagnostics=True)
             
             if user_input is None:
-                print("⚠️ No response - ending conversation")
+                print("⚠️ No response after two attempts - ending conversation")
                 tts.speak("Okay, resuming monitoring. Stay safe!")
                 tts.wait_until_done()
                 break
         
+        # Check for exit keywords
         if any(word in user_input.lower() for word in ['exit', 'quit', 'bye', 'stop', 'goodbye', 'done', 'enough']):
             print("🔚 User ended conversation")
             tts.speak("Alright, drive safely!")
             tts.wait_until_done()
             break
         
+        # Get LLM response
         llm_assistant.get_response_streaming(user_input)
         tts.wait_until_done()
-        
-        turn += 1
+    
+    if turn >= max_turns:
+        print(f"🔚 Reached {max_turns} turns")
+        tts.speak("Let's resume monitoring now. Drive safely!")
+        tts.wait_until_done()
     
     print("\n" + "="*60)
     print("✓ Conversation ended - Resuming monitoring")
@@ -651,7 +752,7 @@ def main():
     """Main function to run the drowsiness detection system."""
     print("\n" + "="*60)
     print("🚗 Driver Drowsiness Detection System V2")
-    print("   Optimized for Raspberry Pi 4B")
+    print("   Using PROVEN WORKING STT Logic")
     print("="*60 + "\n")
     
     tts = TTSEngine()
