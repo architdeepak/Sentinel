@@ -709,7 +709,7 @@ def run_llm_conversation(tts, stt, llm_assistant):
         print(f"\n--- Turn {turn}/{max_turns} ---")
         
         # Listen using EXACT working logic (diagnostics ON for debugging)
-        user_input = stt.listen(timeout=20, show_diagnostics=True)
+        user_input = stt.listen(timeout=20, show_diagnostics=False)
         
         if user_input is None:
             print("⚠️ No input detected")
@@ -717,7 +717,7 @@ def run_llm_conversation(tts, stt, llm_assistant):
             tts.wait_until_done()
             
             # Give one more chance
-            user_input = stt.listen(timeout=10, show_diagnostics=True)
+            user_input = stt.listen(timeout=10, show_diagnostics=False)
             
             if user_input is None:
                 print("⚠️ No response after two attempts - ending conversation")
