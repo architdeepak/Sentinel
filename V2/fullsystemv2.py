@@ -6,7 +6,7 @@ Optimized for Raspberry Pi 4B
 Changes from V1:
 - llama.cpp with Granite model (replaced ollama)
 - espeak-ng for TTS (replaced pyttsx3)
-- Vosk for STT (replaced speech_recognition)
+- Vosk for STT with speech_recognition fallback
 - Performance optimizations for RPi
 """
 
@@ -21,8 +21,6 @@ import queue
 import json
 from pathlib import Path
 from llama_cpp import Llama
-from vosk import Model, KaldiRecognizer
-import pyaudio
 
 # =========================
 # CONFIGURATION
@@ -30,23 +28,23 @@ import pyaudio
 class Config:
     # Model paths
     LLM_MODEL_PATH = Path.home() / "Sentinel" / "modls" / "granite-3.0-1b-a400m-instruct.Q4_K_M.gguf"
-    VOSK_MODEL_PATH = Path.home() / "Sentinel" / "Sentinel" / "vosk-model-small-en-us-0.15"
+    VOSK_MODEL_PATH = Path.home() / "Sentinel" / "vosk-model-small-en-us-0.15"
     
-    # LLM settings
+    # LLM settings (no hard limits - use prompting instead)
     LLM_THREADS = 3
-    LLM_CONTEXT = 1024  # Reduced for RPi
-    LLM_MAX_TOKENS = 60  # Shorter responses for faster processing
+    LLM_CONTEXT = 2048
+    LLM_MAX_TOKENS = 150  # Reasonable max, but prompt guides length
     
     # Audio settings
     ESPEAK_SPEED = 165
     ESPEAK_VOICE = "en-us"
     VOSK_SAMPLE_RATE = 16000
-    VOSK_BUFFER_SIZE = 8192
+    VOSK_BUFFER_SIZE = 4096  # Smaller for better responsiveness
     
     # Camera settings (RPi optimization)
-    CAMERA_WIDTH = 480  # Reduced from default
+    CAMERA_WIDTH = 480
     CAMERA_HEIGHT = 360
-    CAMERA_FPS = 20  # Lower FPS for better processing
+    CAMERA_FPS = 20
     
     # Detection thresholds
     EAR_THRESH = 0.25
@@ -117,81 +115,222 @@ class TTSEngine:
         self.audio_queue.put(None)
 
 # =========================
-# SPEECH-TO-TEXT (Vosk)
+# SPEECH-TO-TEXT (Hybrid)
 # =========================
 class STTEngine:
-    """Vosk-based speech recognition."""
+    """Hybrid STT: Tries Vosk first, falls back to speech_recognition."""
     
     def __init__(self):
-        self.model = None
-        self.recognizer = None
+        self.mode = None
+        self.vosk_model = None
+        self.vosk_recognizer = None
         self.mic = None
         self.stream = None
-        self._initialize()
+        
+        # Try Vosk first
+        if self._initialize_vosk():
+            self.mode = "vosk"
+            print("✓ Using Vosk for STT")
+        else:
+            # Fall back to speech_recognition
+            if self._initialize_speech_recognition():
+                self.mode = "speech_recognition"
+                print("✓ Using speech_recognition library for STT")
+            else:
+                print("⚠️ STT not available")
+                self.mode = None
     
-    def _initialize(self):
-        """Initialize Vosk model and microphone."""
+    def _initialize_vosk(self):
+        """Try to initialize Vosk."""
         try:
-            print("📦 Loading Vosk model...")
-            self.model = Model(str(Config.VOSK_MODEL_PATH))
-            self.recognizer = KaldiRecognizer(self.model, Config.VOSK_SAMPLE_RATE)
+            from vosk import Model, KaldiRecognizer
+            import pyaudio
             
-            print("🎤 Initializing microphone...")
+            if not Config.VOSK_MODEL_PATH.exists():
+                print(f"⚠️ Vosk model not found at {Config.VOSK_MODEL_PATH}")
+                return False
+            
+            print("📦 Loading Vosk model...")
+            self.vosk_model = Model(str(Config.VOSK_MODEL_PATH))
+            self.vosk_recognizer = KaldiRecognizer(self.vosk_model, Config.VOSK_SAMPLE_RATE)
+            self.vosk_recognizer.SetWords(True)  # Enable word-level timestamps
+            
+            print("🎤 Initializing microphone for Vosk...")
             self.mic = pyaudio.PyAudio()
+            
+            # Find best input device
+            default_device = self.mic.get_default_input_device_info()
+            
             self.stream = self.mic.open(
                 format=pyaudio.paInt16,
                 channels=1,
                 rate=Config.VOSK_SAMPLE_RATE,
                 input=True,
+                input_device_index=default_device['index'],
                 frames_per_buffer=Config.VOSK_BUFFER_SIZE
             )
             self.stream.start_stream()
-            print("✓ STT ready")
+            
+            # Test the stream
+            test_data = self.stream.read(Config.VOSK_BUFFER_SIZE, exception_on_overflow=False)
+            if len(test_data) == 0:
+                raise Exception("No audio data from microphone")
+            
+            return True
+            
         except Exception as e:
-            print(f"⚠️ STT initialization failed: {e}")
-            self.model = None
+            print(f"⚠️ Vosk initialization failed: {e}")
+            self._cleanup_vosk()
+            return False
+    
+    def _initialize_speech_recognition(self):
+        """Try to initialize speech_recognition library."""
+        try:
+            import speech_recognition as sr
+            self.sr = sr
+            self.recognizer = sr.Recognizer()
+            
+            # Test microphone
+            with sr.Microphone() as source:
+                self.recognizer.adjust_for_ambient_noise(source, duration=1)
+            
+            return True
+            
+        except Exception as e:
+            print(f"⚠️ speech_recognition initialization failed: {e}")
+            return False
     
     def listen(self, timeout=10):
         """Listen for speech and return transcribed text."""
-        if not self.model:
+        if self.mode == "vosk":
+            return self._listen_vosk(timeout)
+        elif self.mode == "speech_recognition":
+            return self._listen_sr(timeout)
+        else:
+            print("⚠️ No STT engine available")
             return None
-        
-        print("\n🎤 Listening... (speak now)")
+    
+    def _listen_vosk(self, timeout):
+        """Listen using Vosk."""
+        print("\n🎤 Listening (Vosk)... speak now")
         start_time = time.time()
+        
+        # Clear any old data in the stream
+        try:
+            while self.stream.get_read_available() > 0:
+                self.stream.read(self.stream.get_read_available(), exception_on_overflow=False)
+        except:
+            pass
+        
+        silence_threshold = 1.5  # seconds of silence before giving up
+        last_speech_time = time.time()
+        has_spoken = False
+        accumulated_text = []
         
         try:
             while time.time() - start_time < timeout:
-                data = self.stream.read(Config.VOSK_BUFFER_SIZE, exception_on_overflow=False)
+                try:
+                    data = self.stream.read(Config.VOSK_BUFFER_SIZE, exception_on_overflow=False)
+                except Exception as e:
+                    print(f"⚠️ Stream read error: {e}")
+                    time.sleep(0.1)
+                    continue
                 
-                if self.recognizer.AcceptWaveform(data):
-                    result = json.loads(self.recognizer.Result())
+                if self.vosk_recognizer.AcceptWaveform(data):
+                    result = json.loads(self.vosk_recognizer.Result())
                     text = result.get('text', '').strip()
                     
                     if text:
-                        print(f"✓ You said: '{text}'")
-                        return text
+                        accumulated_text.append(text)
+                        last_speech_time = time.time()
+                        has_spoken = True
+                        print(f"  Recognized: '{text}'")
+                else:
+                    # Check partial results
+                    partial = json.loads(self.vosk_recognizer.PartialResult())
+                    partial_text = partial.get('partial', '')
+                    
+                    if partial_text:
+                        last_speech_time = time.time()
+                        has_spoken = True
                 
-                # Check partial results for better responsiveness
-                partial = json.loads(self.recognizer.PartialResult())
-                partial_text = partial.get('partial', '')
-                if partial_text and time.time() - start_time > 2:
-                    # If we have partial text after 2 seconds, wait a bit more
-                    time.sleep(0.5)
+                # If we've heard speech and then silence, finish
+                if has_spoken and (time.time() - last_speech_time > silence_threshold):
+                    break
             
-            print("⏱️ Listening timeout")
+            # Get final result
+            final_result = json.loads(self.vosk_recognizer.FinalResult())
+            final_text = final_result.get('text', '').strip()
+            if final_text:
+                accumulated_text.append(final_text)
+            
+            full_text = ' '.join(accumulated_text).strip()
+            
+            if full_text:
+                print(f"✓ Full transcription: '{full_text}'")
+                return full_text
+            else:
+                print("⏱️ No speech detected (Vosk)")
+                return None
+                
+        except Exception as e:
+            print(f"⚠️ Vosk listening error: {e}")
             return None
+    
+    def _listen_sr(self, timeout):
+        """Listen using speech_recognition library."""
+        print("\n🎤 Listening (Google Speech Recognition)... speak now")
+        
+        try:
+            with self.sr.Microphone() as source:
+                # Quick ambient noise adjustment
+                self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
+                
+                # Listen
+                audio = self.recognizer.listen(
+                    source, 
+                    timeout=timeout, 
+                    phrase_time_limit=15
+                )
             
+            print("🔄 Processing speech...")
+            
+            # Try Google Speech Recognition
+            text = self.recognizer.recognize_google(audio)
+            print(f"✓ You said: '{text}'")
+            return text
+            
+        except self.sr.WaitTimeoutError:
+            print("⏱️ No speech detected (timeout)")
+            return None
+        except self.sr.UnknownValueError:
+            print("❓ Could not understand audio")
+            return None
+        except self.sr.RequestError as e:
+            print(f"⚠️ Speech recognition service error: {e}")
+            return None
         except Exception as e:
             print(f"⚠️ Listening error: {e}")
             return None
     
+    def _cleanup_vosk(self):
+        """Cleanup Vosk resources."""
+        if self.stream:
+            try:
+                self.stream.stop_stream()
+                self.stream.close()
+            except:
+                pass
+        if self.mic:
+            try:
+                self.mic.terminate()
+            except:
+                pass
+    
     def cleanup(self):
         """Cleanup audio resources."""
-        if self.stream:
-            self.stream.stop_stream()
-            self.stream.close()
-        if self.mic:
-            self.mic.terminate()
+        if self.mode == "vosk":
+            self._cleanup_vosk()
 
 # =========================
 # LLM ASSISTANT (llama.cpp)
@@ -234,14 +373,20 @@ class LLMAssistant:
             {
                 "role": "system",
                 "content": (
-                    "You are an in-car voice assistant designed to keep a driver awake and alert. "
-                    "Rules:\n"
-                    "- Be calm, brief, and supportive\n"
-                    "- Keep responses under 2-3 sentences\n"
+                    "You are an in-car voice assistant designed to keep a driver awake and alert.\n\n"
+                    "YOUR SPEAKING STYLE:\n"
+                    "- Keep responses SHORT (1-3 sentences) unless the driver asks for details\n"
+                    "- Be calm, supportive, and conversational\n"
                     "- Ask ONE simple question at a time\n"
-                    "- Suggest gentle activities to stay alert\n"
-                    "- Use a friendly, conversational tone\n"
-                    "- Never be alarmist or stressful"
+                    "- Use natural, friendly language\n"
+                    "- Never be alarmist or stressful\n\n"
+                    "YOUR STRATEGIES:\n"
+                    "- Engage the driver in light conversation\n"
+                    "- Suggest gentle activities: rolling down window, adjusting temperature, light stretches\n"
+                    "- Ask about their destination, plans, interests\n"
+                    "- Recommend taking a break if very drowsy\n"
+                    "- Keep them mentally active with simple questions\n\n"
+                    "Remember: Short and sweet is better. Only elaborate if asked."
                 )
             },
             {
@@ -263,7 +408,7 @@ class LLMAssistant:
         
         stream = self.llm.create_chat_completion(
             messages=self.messages,
-            temperature=0.6,
+            temperature=0.7,
             max_tokens=Config.LLM_MAX_TOKENS,
             stream=True
         )
@@ -324,7 +469,7 @@ def initialize_mediapipe():
     mp_face = mp.solutions.face_mesh
     face_mesh = mp_face.FaceMesh(
         max_num_faces=1,
-        refine_landmarks=False,  # Disable for speed
+        refine_landmarks=False,
         min_detection_confidence=0.5,
         min_tracking_confidence=0.5
     )
@@ -336,7 +481,7 @@ def initialize_camera():
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, Config.CAMERA_WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, Config.CAMERA_HEIGHT)
     cap.set(cv2.CAP_PROP_FPS, Config.CAMERA_FPS)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce latency
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     return cap
 
 def initialize_state_variables():
@@ -479,7 +624,7 @@ def calculate_metrics(state, microsleep, head_down, head_roll):
 def draw_overlay(frame, metrics, ear, mar, microsleep, head_down, head_roll, state, drowsy_state):
     """Draw metrics overlay on the frame."""
     y = 25
-    font_scale = 0.5  # Smaller for RPi
+    font_scale = 0.5
     thickness = 1
     
     EYE_COLOR = (255, 0, 0)
@@ -509,7 +654,7 @@ def draw_overlay(frame, metrics, ear, mar, microsleep, head_down, head_roll, sta
 # =========================
 def run_detection_loop(cap, face_mesh, state):
     """Run the main drowsiness detection loop."""
-    frame_skip = 2  # Process every Nth frame for speed
+    frame_skip = 2
     frame_count = 0
     
     while cap.isOpened():
@@ -519,11 +664,10 @@ def run_detection_loop(cap, face_mesh, state):
 
         frame_count += 1
         if frame_count % frame_skip != 0:
-            continue  # Skip frame
+            continue
 
         now = time.time()
         
-        # Resize for faster processing
         small_frame = cv2.resize(frame, (320, 240))
         rgb = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
         results = face_mesh.process(rgb)
@@ -540,36 +684,29 @@ def run_detection_loop(cap, face_mesh, state):
             lm = results.multi_face_landmarks[0].landmark
             landmarks = [(int(p.x * w), int(p.y * h)) for p in lm]
 
-            # Process all detections
             ear, microsleep = process_eye_metrics(landmarks, state, now)
             mar = process_mouth_metrics(landmarks, state, now)
             head_down = process_head_pitch(landmarks, state, now)
             head_roll = process_head_roll(landmarks, state, now)
 
-        # Cleanup old data
         cleanup_windows(state, now)
-
-        # Calculate metrics
         metrics = calculate_metrics(state, microsleep, head_down, head_roll)
 
-        # Determine state
         drowsy_state = "ALERT"
         if metrics['drowsy_score'] > Config.DROWSY_THRESHOLD:
             drowsy_state = "DROWSY"
             state['drowsy_count'] += 1
 
-        # Draw overlay
         draw_overlay(frame, metrics, ear, mar, microsleep, head_down, 
                      head_roll, state, drowsy_state)
 
         cv2.imshow("Driver Drowsiness Monitor", frame)
 
         key = cv2.waitKey(1) & 0xFF
-        if key == 27:  # ESC
+        if key == 27:
             print("📊 Monitoring ended by user")
             return False
 
-        # Check if LLM should be triggered
         if (state['drowsy_count'] >= Config.DROWSY_TRIGGER_COUNT and 
             drowsy_state == "DROWSY" and 
             not state['llm_triggered']):
@@ -589,23 +726,18 @@ def run_llm_conversation(tts, stt, llm_assistant):
     
     tts.speak("I notice you're feeling drowsy. Let me help you stay alert.")
     
-    # Start conversation
     llm_assistant.start_conversation()
-    
-    # Get initial response
     llm_assistant.get_response_streaming()
     tts.wait_until_done()
     
-    # Conversation loop
-    max_turns = 5
+    max_turns = 8
     turn = 0
     
     while turn < max_turns:
-        # Listen for user input
         user_input = stt.listen(timeout=15)
         
         if user_input is None:
-            tts.speak("I didn't catch that. Are you still there?")
+            tts.speak("Are you still there?")
             tts.wait_until_done()
             user_input = stt.listen(timeout=10)
             
@@ -615,14 +747,12 @@ def run_llm_conversation(tts, stt, llm_assistant):
                 tts.wait_until_done()
                 break
         
-        # Check for exit commands
-        if any(word in user_input.lower() for word in ['exit', 'quit', 'bye', 'stop', 'goodbye']):
+        if any(word in user_input.lower() for word in ['exit', 'quit', 'bye', 'stop', 'goodbye', 'done', 'enough']):
             print("🔚 User ended conversation")
             tts.speak("Alright, drive safely!")
             tts.wait_until_done()
             break
         
-        # Get LLM response
         llm_assistant.get_response_streaming(user_input)
         tts.wait_until_done()
         
@@ -642,7 +772,6 @@ def main():
     print("   Optimized for Raspberry Pi 4B")
     print("="*60 + "\n")
     
-    # Initialize components
     tts = TTSEngine()
     stt = STTEngine()
     llm_assistant = LLMAssistant(tts)
@@ -656,21 +785,17 @@ def main():
 
     try:
         while True:
-            # Run detection loop
             should_trigger_llm = run_detection_loop(cap, face_mesh, state)
 
             if not should_trigger_llm:
                 break
 
-            # Stop detection resources
             cap.release()
             face_mesh.close()
             cv2.destroyAllWindows()
 
-            # Run LLM conversation
             run_llm_conversation(tts, stt, llm_assistant)
 
-            # Restart detection
             try:
                 cap = initialize_camera()
                 face_mesh = initialize_mediapipe()
@@ -686,7 +811,6 @@ def main():
         print("\n\n⚠️ System interrupted by user")
     
     finally:
-        # Cleanup
         print("\n🔄 Cleaning up resources...")
         cap.release()
         face_mesh.close()
