@@ -13,12 +13,12 @@ from llama_cpp import Llama
 # ============================================
 
 # Models directory
-MODELS_DIR = Path.home() / "models"
+MODELS_DIR = Path.home() / "Sentinel" / "modls"
 
 # List your GGUF models here
 MODELS_TO_TEST = [
-    "granite-3.0-1b-a400m-instruct.Q4_K_M.gguf",
-    # "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+    #"granite-3.0-1b-a400m-instruct.Q4_K_M.gguf",
+    "qwen2.5-0.5b-instruct-q4_k_m.gguf",
     # "gemma-2-2b-it-Q4_K_M.gguf",
 ]
 
@@ -26,8 +26,8 @@ MODELS_TO_TEST = [
 SINGLE_MODEL = None  # Set to filename to test just one
 
 # LLM Configuration
-N_THREADS = 3  # Change to 2 if camera lags
-N_CTX = 2048
+N_THREADS = 4  # Change to 2 if camera lags
+N_CTX = 4096
 
 # ============================================
 

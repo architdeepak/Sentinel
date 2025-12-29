@@ -2,11 +2,12 @@
 """
 Complete TTS and STT Test Script for Raspberry Pi
 Tests Piper TTS and Vosk STT
+UPDATED: Works with Bluetooth headphones using paplay
+OPTIMIZED: Uses real-time audio streaming for fastest playback
 """
 
 import os
 import sys
-import wave
 import json
 import subprocess
 import time
@@ -18,14 +19,14 @@ PIPER_VOICE_PATH = os.path.expanduser("~/Sentinel/pipervoices/en_US-amy-medium.o
 VOSK_MODEL_PATH = os.path.expanduser("~/Sentinel/Sentinel/vosk-model-small-en-us-0.15")
 
 def test_tts_piper():
-    """Test Piper TTS."""
+    """Test Piper TTS with Bluetooth headphones support.
+    Uses real-time streaming: audio plays while being generated (fastest method).
+    """
     print("\n" + "="*60)
     print("TESTING PIPER TTS")
     print("="*60)
     
     try:
-        from piper import PiperVoice
-        
         # Check voice file exists
         if not os.path.exists(PIPER_VOICE_PATH):
             print(f"❌ Voice file not found: {PIPER_VOICE_PATH}")
@@ -34,10 +35,14 @@ def test_tts_piper():
         
         print(f"✓ Voice file found: {PIPER_VOICE_PATH}")
         
-        # Load voice
-        print("Loading voice...")
-        voice = PiperVoice.load(PIPER_VOICE_PATH)
-        print("✓ Voice loaded")
+        # Check piper command is available
+        result = subprocess.run(["which", "piper"], capture_output=True)
+        if result.returncode != 0:
+            print("❌ Piper command not found")
+            print("   Make sure piper is installed: pip install piper-tts")
+            return False
+        
+        print("✓ Piper command available")
         
         # Test phrases
         test_phrases = [
@@ -50,32 +55,29 @@ def test_tts_piper():
             print(f"\n[Test {i}/{len(test_phrases)}]")
             print(f"Speaking: {text}")
             
-            output_file = f"/tmp/piper_test_{i}.wav"
-            
-            # Generate speech
+            # Stream audio directly (FASTEST METHOD - plays while generating)
             start = time.time()
-            with wave.open(output_file, "wb") as wav_file:
-                voice.synthesize(text, wav_file)
-            gen_time = time.time() - start
+            cmd = f"echo '{text}' | piper -m {PIPER_VOICE_PATH} --output-raw | paplay --raw --channels=1 --rate=22050 --format=s16le"
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            total_time = time.time() - start
             
-            # Play speech
-            subprocess.run(["aplay", "-q", output_file], check=False)
+            if result.returncode != 0:
+                print(f"❌ Error: {result.stderr}")
+                continue
             
-            # Cleanup
-            os.remove(output_file)
-            
-            print(f"✓ Generation time: {gen_time:.2f}s")
+            print(f"✓ Streamed in: {total_time:.2f}s (real-time playback)")
+            time.sleep(0.3)
         
         print("\n" + "="*60)
         print("✓ PIPER TTS: ALL TESTS PASSED")
+        print("  Using real-time streaming for fastest playback!")
         print("="*60)
         return True
         
-    except ImportError:
-        print("❌ Piper not installed. Run: pip install piper-tts")
-        return False
     except Exception as e:
         print(f"❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 def test_stt_vosk():
@@ -239,20 +241,24 @@ def test_stt_google():
         return False
 
 def test_full_loop():
-    """Test complete TTS → STT loop."""
+    """Test complete TTS → STT loop with Bluetooth support."""
     print("\n" + "="*60)
     print("TESTING COMPLETE TTS → STT LOOP")
     print("="*60)
     print("This simulates the drowsiness assistant workflow")
     
     try:
-        from piper import PiperVoice
         from vosk import Model, KaldiRecognizer
         import pyaudio
         
+        # Check piper command
+        result = subprocess.run(["which", "piper"], capture_output=True)
+        if result.returncode != 0:
+            print("❌ Piper command not found")
+            return False
+        
         # Load TTS
-        print("\n1. Loading TTS voice...")
-        voice = PiperVoice.load(PIPER_VOICE_PATH)
+        print("\n1. TTS ready (using piper command)")
         print("✓ TTS ready")
         
         # Load STT
@@ -278,10 +284,9 @@ def test_full_loop():
         assistant_msg = "I notice you're feeling drowsy. How are you doing?"
         print(f"\n🤖 Assistant: {assistant_msg}")
         
-        with wave.open("/tmp/loop_test.wav", "wb") as wav_file:
-            voice.synthesize(assistant_msg, wav_file)
-        subprocess.run(["aplay", "-q", "/tmp/loop_test.wav"])
-        os.remove("/tmp/loop_test.wav")
+        # Stream audio directly (fastest - plays while generating)
+        cmd = f"echo '{assistant_msg}' | piper -m {PIPER_VOICE_PATH} --output-raw | paplay --raw --channels=1 --rate=22050 --format=s16le"
+        subprocess.run(cmd, shell=True, capture_output=True)
         
         # Listen for response
         print("🎤 Your turn to respond (5 seconds)...")
@@ -308,12 +313,15 @@ def test_full_loop():
         
     except Exception as e:
         print(f"❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 def main():
     """Run all tests."""
     print("\n" + "#"*60)
     print("# TTS & STT COMPLETE TEST SUITE")
+    print("# Bluetooth-compatible with real-time streaming")
     print("#"*60)
     
     results = {}

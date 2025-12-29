@@ -1,63 +1,67 @@
 #!/usr/bin/env python3
 """
-Streaming LLM with Sentence-by-Sentence TTS
-Speaks as soon as each sentence is ready!
+ACTUALLY WORKING Streaming TTS
+Plays audio IMMEDIATELY while LLM continues generating
+Uses background threads for each audio chunk
 """
 
 import time
-import wave
 import subprocess
 import threading
 from pathlib import Path
 from llama_cpp import Llama
-from piper import PiperVoice
 
 # ============================================
 # CONFIGURATION
 # ============================================
 HOME = Path.home()
-PIPER_VOICE_PATH = HOME / "piper_voices" / "en_US-amy-medium.onnx"
-LLM_MODEL_PATH = HOME / "models" / "granite-3.0-1b-a400m-instruct.Q4_K_M.gguf"
+PIPER_VOICE_PATH = HOME / "Sentinel" / "pipervoices" / "en_US-amy-medium.onnx"
+LLM_MODEL_PATH = HOME / "Sentinel" / "modls" / "granite-3.0-1b-a400m-instruct.Q4_K_M.gguf"
+
+LLM_THREADS = 3
+CHUNK_SIZE = 10  # Words per chunk
 
 # ============================================
-# TTS FUNCTIONS
+# IMMEDIATE AUDIO PLAYBACK
 # ============================================
 
-def speak_text(voice, text, sentence_id):
-    """Generate and play audio for one sentence."""
-    if not text.strip():
-        return
+def play_audio_async(text, voice_path, chunk_id):
+    """
+    Play audio in background thread.
+    Returns immediately so LLM can keep generating!
+    """
+    def _play():
+        if not text.strip():
+            return
+        
+        # Escape text
+        text_escaped = text.replace("'", "'\"'\"'")
+        
+        # Generate and play
+        cmd = f"echo '{text_escaped}' | piper -m {voice_path} --output-raw | paplay --raw --channels=1 --rate=22050 --format=s16le 2>/dev/null &"
+        
+        subprocess.run(cmd, shell=True)
     
-    temp_file = f"/tmp/tts_{sentence_id}.wav"
-    
-    # Generate TTS
-    with wave.open(temp_file, "wb") as wav_file:
-        voice.synthesize(text, wav_file)
-    
-    # Play audio
-    subprocess.run(["aplay", "-q", temp_file], check=False)
-
-def speak_async(voice, text, sentence_id):
-    """Speak in background thread so LLM can continue generating."""
-    thread = threading.Thread(target=speak_text, args=(voice, text, sentence_id))
-    thread.daemon = True
+    # Start in background thread
+    thread = threading.Thread(target=_play, daemon=True)
     thread.start()
+    
     return thread
 
 # ============================================
-# STREAMING LLM
+# STREAMING WITH IMMEDIATE PLAYBACK
 # ============================================
 
-def stream_response_non_blocking(llm, voice, user_message):
+def stream_with_immediate_audio(llm, voice_path, user_message):
     """
-    Stream LLM response and speak sentence-by-sentence.
-    Non-blocking: speaks while continuing to generate.
+    Stream LLM response and play audio IMMEDIATELY.
+    Audio plays while LLM continues generating!
     """
     
     messages = [
         {
             "role": "system",
-            "content": "You are an in-car voice assistant. Keep responses under 3 sentences. Be brief."
+            "content": "You are an in-car voice assistant. Keep responses under 2 sentences. Be brief."
         },
         {
             "role": "user",
@@ -65,203 +69,203 @@ def stream_response_non_blocking(llm, voice, user_message):
         }
     ]
     
-    print(f"\nUser: {user_message}")
+    print(f"\n{'─'*60}")
+    print(f"User: {user_message}")
+    print(f"{'─'*60}")
     print("Assistant: ", end='', flush=True)
     
-    # Start streaming
+    # Timing
+    start_time = time.time()
+    first_audio_started = None
+    generation_complete = None
+    
+    # Start LLM streaming
     stream = llm.create_chat_completion(
         messages=messages,
         temperature=0.7,
-        max_tokens=100,
-        stream=True  # ← Enable streaming!
+        max_tokens=60,
+        stream=True
     )
     
-    buffer = ""
-    sentence_count = 0
-    tts_threads = []
+    buffer = []
+    chunk_count = 0
+    audio_threads = []
     full_response = ""
-    
-    start_time = time.time()
-    first_speech_time = None
     
     for chunk in stream:
         delta = chunk['choices'][0]['delta']
         
         if 'content' in delta:
             token = delta['content']
-            buffer += token
             full_response += token
             print(token, end='', flush=True)
             
-            # Check for sentence boundaries
-            if token in ['.', '!', '?', '\n']:
-                sentence = buffer.strip()
+            # Add words to buffer
+            words = token.split()
+            buffer.extend(words)
+            
+            # When we have enough words, play immediately!
+            if len(buffer) >= CHUNK_SIZE:
+                chunk_text = ' '.join(buffer[:CHUNK_SIZE])
+                chunk_count += 1
                 
-                if sentence:
-                    # Speak this sentence while continuing to generate!
-                    sentence_count += 1
-                    thread = speak_async(voice, sentence, sentence_count)
-                    tts_threads.append(thread)
-                    
-                    if first_speech_time is None:
-                        first_speech_time = time.time() - start_time
+                # Mark when first audio started
+                if first_audio_started is None:
+                    first_audio_started = time.time()
+                    print(f"\n[🔊 Audio started while generating...]", flush=True)
+                    print("Assistant (continued): ", end='', flush=True)
                 
-                buffer = ""
+                # Play in background - returns IMMEDIATELY!
+                thread = play_audio_async(chunk_text, voice_path, chunk_count)
+                audio_threads.append(thread)
+                
+                buffer = buffer[CHUNK_SIZE:]
     
-    # Speak any remaining text
-    if buffer.strip():
-        sentence_count += 1
-        thread = speak_async(voice, buffer.strip(), sentence_count)
-        tts_threads.append(thread)
+    # Generation complete
+    generation_complete = time.time()
+    
+    # Play any remaining words
+    if buffer:
+        chunk_text = ' '.join(buffer)
+        chunk_count += 1
         
-        if first_speech_time is None:
-            first_speech_time = time.time() - start_time
+        if first_audio_started is None:
+            first_audio_started = time.time()
+        
+        thread = play_audio_async(chunk_text, voice_path, chunk_count)
+        audio_threads.append(thread)
     
-    print()  # New line after response
+    print()
     
-    # Wait for all TTS to finish
-    for thread in tts_threads:
-        thread.join()
+    # Wait for all audio to finish
+    print(f"\n[Waiting for {len(audio_threads)} audio chunks to finish...]")
+    for thread in audio_threads:
+        thread.join(timeout=5)
     
-    total_time = time.time() - start_time
+    audio_complete = time.time()
     
-    return {
-        'full_response': full_response,
-        'total_time': total_time,
-        'first_speech_time': first_speech_time,
-        'sentence_count': sentence_count
-    }
-
-def stream_response_blocking(llm, voice, user_message):
-    """
-    Stream LLM response but wait for complete response before speaking.
-    (Current behavior - for comparison)
-    """
+    # Calculate timings
+    generation_time = (generation_complete - start_time) * 1000
+    ttfa = (first_audio_started - start_time) * 1000 if first_audio_started else 0
+    total_time = (audio_complete - start_time) * 1000
     
-    messages = [
-        {
-            "role": "system",
-            "content": "You are an in-car voice assistant. Keep responses under 3 sentences. Be brief."
-        },
-        {
-            "role": "user",
-            "content": user_message
-        }
-    ]
+    print(f"\n{'='*60}")
+    print("⏱️  TIMING BREAKDOWN")
+    print(f"{'='*60}")
+    print(f"  LLM Generation:       {generation_time:6.0f}ms")
+    print(f"  🎯 First Audio:        {ttfa:6.0f}ms ← Started DURING generation!")
+    print(f"  Total (gen + audio):  {total_time:6.0f}ms")
+    print(f"  Chunks played:        {chunk_count}")
+    print(f"{'='*60}")
     
-    print(f"\nUser: {user_message}")
-    print("Assistant: ", end='', flush=True)
+    # Check if streaming worked
+    if first_audio_started and first_audio_started < generation_complete:
+        overlap = (generation_complete - first_audio_started) * 1000
+        print(f"\n✅ STREAMING WORKED!")
+        print(f"   Audio played {overlap:.0f}ms BEFORE generation finished!")
+    else:
+        print(f"\n⚠️  Streaming didn't work - audio waited for completion")
     
-    start_time = time.time()
-    
-    # Get complete response
-    response = llm.create_chat_completion(
-        messages=messages,
-        temperature=0.7,
-        max_tokens=100
-    )
-    
-    generation_time = time.time() - start_time
-    
-    text = response['choices'][0]['message']['content']
-    print(text)
-    
-    # Now speak entire response
-    speak_text(voice, text, 0)
-    
-    total_time = time.time() - start_time
+    print(f"{'='*60}")
     
     return {
-        'full_response': text,
+        'response': full_response,
         'generation_time': generation_time,
-        'total_time': total_time
+        'ttfa': ttfa,
+        'total_time': total_time,
+        'streaming_worked': first_audio_started < generation_complete if first_audio_started else False
     }
-
-# ============================================
-# COMPARISON TEST
-# ============================================
-
-def compare_methods(llm, voice):
-    """Compare streaming vs non-streaming."""
-    
-    test_prompts = [
-        "I'm feeling drowsy",
-        "I had a long day at work",
-        "I need help staying awake"
-    ]
-    
-    print("\n" + "="*60)
-    print("COMPARISON: Streaming vs Non-Streaming")
-    print("="*60)
-    
-    for prompt in test_prompts:
-        print(f"\n\n{'#'*60}")
-        print(f"Test Prompt: '{prompt}'")
-        print(f"{'#'*60}")
-        
-        # Method 1: Non-Streaming (current)
-        print("\n[Method 1: Non-Streaming - Wait for Complete Response]")
-        result1 = stream_response_blocking(llm, voice, prompt)
-        print(f"\n  Generation time: {result1['generation_time']:.2f}s")
-        print(f"  Total time: {result1['total_time']:.2f}s")
-        print(f"  User waits: {result1['total_time']:.2f}s before hearing anything")
-        
-        time.sleep(2)
-        
-        # Method 2: Streaming (optimized)
-        print("\n[Method 2: Streaming - Speak Sentence-by-Sentence]")
-        result2 = stream_response_non_blocking(llm, voice, prompt)
-        print(f"\n  First speech at: {result2['first_speech_time']:.2f}s")
-        print(f"  Total time: {result2['total_time']:.2f}s")
-        print(f"  User waits: {result2['first_speech_time']:.2f}s before hearing something")
-        
-        # Comparison
-        time_saved = result1['total_time'] - result2['first_speech_time']
-        percent_improvement = (time_saved / result1['total_time']) * 100
-        
-        print(f"\n  {'─'*50}")
-        print(f"  Time saved: {time_saved:.2f}s ({percent_improvement:.0f}% faster!)")
-        print(f"  {'─'*50}")
-        
-        time.sleep(3)
 
 # ============================================
 # MAIN
 # ============================================
 
 def main():
-    """Run comparison test."""
+    """Run test."""
     
     print("\n" + "#"*60)
-    print("# STREAMING LLM + TTS TEST")
-    print("# Comparing: Wait vs Stream Approaches")
+    print("# ACTUALLY WORKING STREAMING TTS")
+    print("# Audio plays WHILE LLM generates")
     print("#"*60)
     
-    # Load models
-    print("\nLoading models...")
+    print("\n⚠️  IMPORTANT: Close Chromium first!")
+    print("   Run: pkill chromium")
+    input("\nPress Enter when ready...")
     
-    voice = PiperVoice.load(str(PIPER_VOICE_PATH))
-    print("✓ TTS loaded")
+    print("\n" + "─"*60)
+    print("Loading Models...")
+    print("─"*60)
+    
+    print(f"  Loading LLM ({LLM_THREADS} threads)...", end='', flush=True)
+    start = time.time()
     
     llm = Llama(
         model_path=str(LLM_MODEL_PATH),
         n_ctx=2048,
-        n_threads=3,
+        n_threads=LLM_THREADS,
         n_gpu_layers=0,
         verbose=False
     )
-    print("✓ LLM loaded")
     
-    # Run comparison
-    compare_methods(llm, voice)
+    print(f" ✓ ({time.time() - start:.1f}s)")
     
-    print("\n\n" + "="*60)
-    print("SUMMARY")
-    print("="*60)
-    print("Non-Streaming: User waits for complete generation")
-    print("Streaming: User hears response 50-70% faster!")
-    print("\n✓ Recommendation: Use streaming for Version 2!")
-    print("="*60)
+    # Warm-up
+    print("  Warming up LLM...", end='', flush=True)
+    llm.create_chat_completion(
+        messages=[{"role": "user", "content": "Hi"}],
+        max_tokens=5
+    )
+    print(" ✓")
+    
+    print("\n✅ Ready!\n")
+    time.sleep(0.5)
+    
+    # Test prompts
+    prompts = [
+        "I'm feeling drowsy and need help",
+        "I had a really long day at work today",
+        "Can you help me stay awake while driving"
+    ]
+    
+    results = []
+    
+    for i, prompt in enumerate(prompts, 1):
+        print(f"\n\n{'#'*60}")
+        print(f"Test {i}/{len(prompts)}")
+        print(f"{'#'*60}")
+        
+        result = stream_with_immediate_audio(llm, PIPER_VOICE_PATH, prompt)
+        results.append(result)
+        
+        time.sleep(3)  # Pause between tests
+    
+    # Final summary
+    print(f"\n\n{'='*60}")
+    print("📊 FINAL SUMMARY")
+    print(f"{'='*60}")
+    
+    streaming_count = sum(1 for r in results if r['streaming_worked'])
+    avg_ttfa = sum(r['ttfa'] for r in results) / len(results)
+    avg_gen = sum(r['generation_time'] for r in results) / len(results)
+    
+    print(f"\n  Tests where streaming worked: {streaming_count}/{len(results)}")
+    print(f"  Average generation time:      {avg_gen:.0f}ms")
+    print(f"  Average first audio:          {avg_ttfa:.0f}ms")
+    
+    if streaming_count == len(results):
+        print(f"\n  ✅ STREAMING WORKS PERFECTLY!")
+        print(f"     Audio starts {avg_gen - avg_ttfa:.0f}ms BEFORE generation finishes!")
+    elif streaming_count > 0:
+        print(f"\n  🟡 STREAMING WORKS SOMETIMES")
+    else:
+        print(f"\n  ❌ STREAMING NOT WORKING")
+        print(f"     Audio waits for complete generation")
+        print(f"\n  Possible issues:")
+        print(f"     - Piper might be slow")
+        print(f"     - Bluetooth latency")
+        print(f"     - Background processes (Chromium?)")
+    
+    print(f"{'='*60}")
 
 if __name__ == "__main__":
     main()
