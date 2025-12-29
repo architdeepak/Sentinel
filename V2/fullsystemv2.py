@@ -180,7 +180,7 @@ class STTEngine:
     def listen(self, timeout=None):
         """
         Listen for speech and return transcribed text.
-        Uses the exact logic from the working test script.
+        More lenient - accumulates text and waits for complete phrases.
         
         Args:
             timeout: Listening timeout in seconds (default: Config.STT_TIMEOUT)
@@ -199,41 +199,63 @@ class STTEngine:
         print("   Speak clearly into your microphone")
         
         start_time = time.time()
-        recognized_text = ""
+        accumulated_text = []  # Collect all text chunks
+        has_partial = False  # Track if we've seen any partial results
+        last_speech_time = start_time
+        silence_grace = 2.0  # Give 2 seconds after last partial before giving up
         
         try:
             # Calculate number of iterations based on timeout
-            # Formula from test script: int(SAMPLE_RATE / BUFFER_SIZE * TIMEOUT)
             iterations = int(Config.VOSK_SAMPLE_RATE / Config.VOSK_BUFFER_SIZE * timeout)
             
             for i in range(iterations):
                 # Read audio data
                 data = self.stream.read(Config.VOSK_BUFFER_SIZE, exception_on_overflow=False)
                 
+                # Check for partial results (indicates speech is happening)
+                partial = json.loads(self.recognizer.PartialResult())
+                partial_text = partial.get('partial', '')
+                if partial_text:
+                    has_partial = True
+                    last_speech_time = time.time()
+                
                 # Process audio
                 if self.recognizer.AcceptWaveform(data):
                     result = json.loads(self.recognizer.Result())
-                    text = result.get('text', '')
+                    text = result.get('text', '').strip()
                     
+                    # Accumulate ANY text (even if short)
                     if text:
-                        recognized_text = text
-                        elapsed = time.time() - start_time
-                        print(f"✓ You said: '{text}'")
-                        print(f"✓ Recognition time: {elapsed:.2f}s")
-                        return recognized_text
+                        accumulated_text.append(text)
+                        last_speech_time = time.time()
+                        print(f"  [Captured: '{text}']")
+                
+                # If we've seen speech but now have silence for too long, finish
+                if has_partial and (time.time() - last_speech_time > silence_grace):
+                    print("  [Detected end of speech]")
+                    break
             
-            # Check final result if nothing detected in loop
+            # Get any final result
             final_result = json.loads(self.recognizer.FinalResult())
-            final_text = final_result.get('text', '')
+            final_text = final_result.get('text', '').strip()
+            if final_text and final_text not in accumulated_text:
+                accumulated_text.append(final_text)
             
-            if final_text:
+            # Combine all accumulated text
+            full_text = ' '.join(accumulated_text).strip()
+            
+            if full_text:
                 elapsed = time.time() - start_time
-                print(f"✓ You said: '{final_text}'")
+                print(f"✓ You said: '{full_text}'")
                 print(f"✓ Recognition time: {elapsed:.2f}s")
-                return final_text
+                return full_text
             
             # No speech detected
-            print("⏱️ No speech detected (timeout)")
+            elapsed = time.time() - start_time
+            if has_partial:
+                print(f"⏱️ Heard speech but couldn't understand (after {elapsed:.1f}s)")
+            else:
+                print(f"⏱️ No speech detected (after {elapsed:.1f}s)")
             return None
             
         except Exception as e:
