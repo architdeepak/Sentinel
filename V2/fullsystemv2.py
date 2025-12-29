@@ -6,7 +6,7 @@ Optimized for Raspberry Pi 4B
 Changes from V1:
 - llama.cpp with Granite model (replaced ollama)
 - espeak-ng for TTS (replaced pyttsx3)
-- Vosk for STT with speech_recognition fallback
+- Vosk for STT (using proven working logic)
 - Performance optimizations for RPi
 """
 
@@ -21,6 +21,8 @@ import queue
 import json
 from pathlib import Path
 from llama_cpp import Llama
+from vosk import Model, KaldiRecognizer
+import pyaudio
 
 # =========================
 # CONFIGURATION
@@ -28,18 +30,21 @@ from llama_cpp import Llama
 class Config:
     # Model paths
     LLM_MODEL_PATH = Path.home() / "Sentinel" / "modls" / "granite-3.0-1b-a400m-instruct.Q4_K_M.gguf"
-    VOSK_MODEL_PATH = Path.home() / "Sentinel" / "vosk-model-small-en-us-0.15"
+    VOSK_MODEL_PATH = Path.home() / "Sentinel" / "Sentinel" / "vosk-model-small-en-us-0.15"
     
     # LLM settings (no hard limits - use prompting instead)
     LLM_THREADS = 3
     LLM_CONTEXT = 2048
-    LLM_MAX_TOKENS = 150  # Reasonable max, but prompt guides length
+    LLM_MAX_TOKENS = 150
     
     # Audio settings
     ESPEAK_SPEED = 165
     ESPEAK_VOICE = "en-us"
     VOSK_SAMPLE_RATE = 16000
-    VOSK_BUFFER_SIZE = 4096  # Smaller for better responsiveness
+    VOSK_BUFFER_SIZE = 8192  # Using working value from test script
+    
+    # STT settings
+    STT_TIMEOUT = 20  # 20 second listening window
     
     # Camera settings (RPi optimization)
     CAMERA_WIDTH = 480
@@ -115,222 +120,140 @@ class TTSEngine:
         self.audio_queue.put(None)
 
 # =========================
-# SPEECH-TO-TEXT (Hybrid)
+# SPEECH-TO-TEXT (Vosk)
 # =========================
 class STTEngine:
-    """Hybrid STT: Tries Vosk first, falls back to speech_recognition."""
+    """Vosk-based speech recognition using proven working logic."""
     
     def __init__(self):
-        self.mode = None
-        self.vosk_model = None
-        self.vosk_recognizer = None
+        self.model = None
+        self.recognizer = None
         self.mic = None
         self.stream = None
-        
-        # Try Vosk first
-        if self._initialize_vosk():
-            self.mode = "vosk"
-            print("✓ Using Vosk for STT")
-        else:
-            # Fall back to speech_recognition
-            if self._initialize_speech_recognition():
-                self.mode = "speech_recognition"
-                print("✓ Using speech_recognition library for STT")
-            else:
-                print("⚠️ STT not available")
-                self.mode = None
+        self._initialize()
     
-    def _initialize_vosk(self):
-        """Try to initialize Vosk."""
+    def _initialize(self):
+        """Initialize Vosk model and microphone."""
         try:
-            from vosk import Model, KaldiRecognizer
-            import pyaudio
-            
+            # Check model exists
             if not Config.VOSK_MODEL_PATH.exists():
-                print(f"⚠️ Vosk model not found at {Config.VOSK_MODEL_PATH}")
-                return False
+                print(f"❌ Vosk model not found: {Config.VOSK_MODEL_PATH}")
+                print("   Download model to continue")
+                return
             
+            print(f"✓ Vosk model found: {Config.VOSK_MODEL_PATH}")
+            
+            # Load model
             print("📦 Loading Vosk model...")
-            self.vosk_model = Model(str(Config.VOSK_MODEL_PATH))
-            self.vosk_recognizer = KaldiRecognizer(self.vosk_model, Config.VOSK_SAMPLE_RATE)
-            self.vosk_recognizer.SetWords(True)  # Enable word-level timestamps
+            self.model = Model(str(Config.VOSK_MODEL_PATH))
+            self.recognizer = KaldiRecognizer(self.model, Config.VOSK_SAMPLE_RATE)
+            print("✓ Vosk model loaded")
             
-            print("🎤 Initializing microphone for Vosk...")
+            # Setup microphone
+            print("🎤 Setting up microphone...")
             self.mic = pyaudio.PyAudio()
             
-            # Find best input device
-            default_device = self.mic.get_default_input_device_info()
+            # List available microphones
+            print("\nAvailable microphones:")
+            for i in range(self.mic.get_device_count()):
+                info = self.mic.get_device_info_by_index(i)
+                if info['maxInputChannels'] > 0:
+                    print(f"  {i}: {info['name']}")
             
+            # Open stream with exact settings from working test script
             self.stream = self.mic.open(
                 format=pyaudio.paInt16,
                 channels=1,
                 rate=Config.VOSK_SAMPLE_RATE,
                 input=True,
-                input_device_index=default_device['index'],
                 frames_per_buffer=Config.VOSK_BUFFER_SIZE
             )
             self.stream.start_stream()
-            
-            # Test the stream
-            test_data = self.stream.read(Config.VOSK_BUFFER_SIZE, exception_on_overflow=False)
-            if len(test_data) == 0:
-                raise Exception("No audio data from microphone")
-            
-            return True
+            print("✓ Microphone ready")
+            print("✓ STT Engine initialized successfully\n")
             
         except Exception as e:
-            print(f"⚠️ Vosk initialization failed: {e}")
-            self._cleanup_vosk()
-            return False
+            print(f"⚠️ STT initialization failed: {e}")
+            self.model = None
+            self.cleanup()
     
-    def _initialize_speech_recognition(self):
-        """Try to initialize speech_recognition library."""
-        try:
-            import speech_recognition as sr
-            self.sr = sr
-            self.recognizer = sr.Recognizer()
-            
-            # Test microphone
-            with sr.Microphone() as source:
-                self.recognizer.adjust_for_ambient_noise(source, duration=1)
-            
-            return True
-            
-        except Exception as e:
-            print(f"⚠️ speech_recognition initialization failed: {e}")
-            return False
-    
-    def listen(self, timeout=10):
-        """Listen for speech and return transcribed text."""
-        if self.mode == "vosk":
-            return self._listen_vosk(timeout)
-        elif self.mode == "speech_recognition":
-            return self._listen_sr(timeout)
-        else:
-            print("⚠️ No STT engine available")
+    def listen(self, timeout=None):
+        """
+        Listen for speech and return transcribed text.
+        Uses the exact logic from the working test script.
+        
+        Args:
+            timeout: Listening timeout in seconds (default: Config.STT_TIMEOUT)
+        
+        Returns:
+            str: Transcribed text, or None if no speech detected
+        """
+        if not self.model:
+            print("⚠️ STT not available")
             return None
-    
-    def _listen_vosk(self, timeout):
-        """Listen using Vosk."""
-        print("\n🎤 Listening (Vosk)... speak now")
+        
+        if timeout is None:
+            timeout = Config.STT_TIMEOUT
+        
+        print(f"\n🎤 Listening... (you have {timeout} seconds)")
+        print("   Speak clearly into your microphone")
+        
         start_time = time.time()
-        
-        # Clear any old data in the stream
-        try:
-            while self.stream.get_read_available() > 0:
-                self.stream.read(self.stream.get_read_available(), exception_on_overflow=False)
-        except:
-            pass
-        
-        silence_threshold = 1.5  # seconds of silence before giving up
-        last_speech_time = time.time()
-        has_spoken = False
-        accumulated_text = []
+        recognized_text = ""
         
         try:
-            while time.time() - start_time < timeout:
-                try:
-                    data = self.stream.read(Config.VOSK_BUFFER_SIZE, exception_on_overflow=False)
-                except Exception as e:
-                    print(f"⚠️ Stream read error: {e}")
-                    time.sleep(0.1)
-                    continue
+            # Calculate number of iterations based on timeout
+            # Formula from test script: int(SAMPLE_RATE / BUFFER_SIZE * TIMEOUT)
+            iterations = int(Config.VOSK_SAMPLE_RATE / Config.VOSK_BUFFER_SIZE * timeout)
+            
+            for i in range(iterations):
+                # Read audio data
+                data = self.stream.read(Config.VOSK_BUFFER_SIZE, exception_on_overflow=False)
                 
-                if self.vosk_recognizer.AcceptWaveform(data):
-                    result = json.loads(self.vosk_recognizer.Result())
-                    text = result.get('text', '').strip()
+                # Process audio
+                if self.recognizer.AcceptWaveform(data):
+                    result = json.loads(self.recognizer.Result())
+                    text = result.get('text', '')
                     
                     if text:
-                        accumulated_text.append(text)
-                        last_speech_time = time.time()
-                        has_spoken = True
-                        print(f"  Recognized: '{text}'")
-                else:
-                    # Check partial results
-                    partial = json.loads(self.vosk_recognizer.PartialResult())
-                    partial_text = partial.get('partial', '')
-                    
-                    if partial_text:
-                        last_speech_time = time.time()
-                        has_spoken = True
-                
-                # If we've heard speech and then silence, finish
-                if has_spoken and (time.time() - last_speech_time > silence_threshold):
-                    break
+                        recognized_text = text
+                        elapsed = time.time() - start_time
+                        print(f"✓ You said: '{text}'")
+                        print(f"✓ Recognition time: {elapsed:.2f}s")
+                        return recognized_text
             
-            # Get final result
-            final_result = json.loads(self.vosk_recognizer.FinalResult())
-            final_text = final_result.get('text', '').strip()
+            # Check final result if nothing detected in loop
+            final_result = json.loads(self.recognizer.FinalResult())
+            final_text = final_result.get('text', '')
+            
             if final_text:
-                accumulated_text.append(final_text)
+                elapsed = time.time() - start_time
+                print(f"✓ You said: '{final_text}'")
+                print(f"✓ Recognition time: {elapsed:.2f}s")
+                return final_text
             
-            full_text = ' '.join(accumulated_text).strip()
-            
-            if full_text:
-                print(f"✓ Full transcription: '{full_text}'")
-                return full_text
-            else:
-                print("⏱️ No speech detected (Vosk)")
-                return None
-                
-        except Exception as e:
-            print(f"⚠️ Vosk listening error: {e}")
-            return None
-    
-    def _listen_sr(self, timeout):
-        """Listen using speech_recognition library."""
-        print("\n🎤 Listening (Google Speech Recognition)... speak now")
-        
-        try:
-            with self.sr.Microphone() as source:
-                # Quick ambient noise adjustment
-                self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
-                
-                # Listen
-                audio = self.recognizer.listen(
-                    source, 
-                    timeout=timeout, 
-                    phrase_time_limit=15
-                )
-            
-            print("🔄 Processing speech...")
-            
-            # Try Google Speech Recognition
-            text = self.recognizer.recognize_google(audio)
-            print(f"✓ You said: '{text}'")
-            return text
-            
-        except self.sr.WaitTimeoutError:
+            # No speech detected
             print("⏱️ No speech detected (timeout)")
             return None
-        except self.sr.UnknownValueError:
-            print("❓ Could not understand audio")
-            return None
-        except self.sr.RequestError as e:
-            print(f"⚠️ Speech recognition service error: {e}")
-            return None
+            
         except Exception as e:
             print(f"⚠️ Listening error: {e}")
             return None
     
-    def _cleanup_vosk(self):
-        """Cleanup Vosk resources."""
-        if self.stream:
-            try:
-                self.stream.stop_stream()
-                self.stream.close()
-            except:
-                pass
-        if self.mic:
-            try:
-                self.mic.terminate()
-            except:
-                pass
-    
     def cleanup(self):
         """Cleanup audio resources."""
-        if self.mode == "vosk":
-            self._cleanup_vosk()
+        try:
+            if self.stream:
+                self.stream.stop_stream()
+                self.stream.close()
+        except:
+            pass
+        
+        try:
+            if self.mic:
+                self.mic.terminate()
+        except:
+            pass
 
 # =========================
 # LLM ASSISTANT (llama.cpp)
@@ -734,12 +657,13 @@ def run_llm_conversation(tts, stt, llm_assistant):
     turn = 0
     
     while turn < max_turns:
-        user_input = stt.listen(timeout=15)
+        # Listen with 20 second timeout
+        user_input = stt.listen(timeout=20)
         
         if user_input is None:
             tts.speak("Are you still there?")
             tts.wait_until_done()
-            user_input = stt.listen(timeout=10)
+            user_input = stt.listen(timeout=15)
             
             if user_input is None:
                 print("⚠️ No response - ending conversation")
