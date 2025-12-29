@@ -1,0 +1,699 @@
+#!/usr/bin/env python3
+"""
+Driver Drowsiness Detection System V2
+Optimized for Raspberry Pi 4B
+
+Changes from V1:
+- llama.cpp with Granite model (replaced ollama)
+- espeak-ng for TTS (replaced pyttsx3)
+- Vosk for STT (replaced speech_recognition)
+- Performance optimizations for RPi
+"""
+
+import cv2
+import mediapipe as mp
+import numpy as np
+from collections import deque
+import time
+import subprocess
+import threading
+import queue
+import json
+from pathlib import Path
+from llama_cpp import Llama
+from vosk import Model, KaldiRecognizer
+import pyaudio
+
+# =========================
+# CONFIGURATION
+# =========================
+class Config:
+    # Model paths
+    LLM_MODEL_PATH = Path.home() / "Sentinel" / "modls" / "granite-3.0-1b-a400m-instruct.Q4_K_M.gguf"
+    VOSK_MODEL_PATH = Path.home() / "Sentinel" / "Sentinel" / "vosk-model-small-en-us-0.15"
+    
+    # LLM settings
+    LLM_THREADS = 3
+    LLM_CONTEXT = 1024  # Reduced for RPi
+    LLM_MAX_TOKENS = 60  # Shorter responses for faster processing
+    
+    # Audio settings
+    ESPEAK_SPEED = 165
+    ESPEAK_VOICE = "en-us"
+    VOSK_SAMPLE_RATE = 16000
+    VOSK_BUFFER_SIZE = 8192
+    
+    # Camera settings (RPi optimization)
+    CAMERA_WIDTH = 480  # Reduced from default
+    CAMERA_HEIGHT = 360
+    CAMERA_FPS = 20  # Lower FPS for better processing
+    
+    # Detection thresholds
+    EAR_THRESH = 0.25
+    MAR_THRESH = 0.6
+    MICROSLEEP_TIME = 1.5
+    SLOW_BLINK_TIME = 0.4
+    HEAD_DOWN_THRESH = 0.12
+    HEAD_DOWN_TIME = 1.2
+    HEAD_ROLL_THRESH = 15
+    ROLL_TIME = 1.2
+    WINDOW_TIME = 10
+    DROWSY_THRESHOLD = 0.47
+    DROWSY_TRIGGER_COUNT = 10
+
+# =========================
+# LANDMARKS CONSTANTS
+# =========================
+LEFT_EYE = [362, 385, 387, 263, 373, 380]
+RIGHT_EYE = [33, 160, 158, 133, 153, 144]
+LEFT_EYE_CORNER = 33
+RIGHT_EYE_CORNER = 263
+NOSE_TIP = 1
+FOREHEAD = 10
+CHIN = 152
+MOUTH_LANDMARKS = [13, 14, 61, 291]
+
+# =========================
+# TEXT-TO-SPEECH (espeak-ng)
+# =========================
+class TTSEngine:
+    """Clean TTS using espeak-ng with queue-based playback."""
+    
+    def __init__(self):
+        self.audio_queue = queue.Queue()
+        self.worker_thread = threading.Thread(target=self._audio_worker, daemon=True)
+        self.worker_thread.start()
+        self.is_speaking = False
+    
+    def _audio_worker(self):
+        """Plays sentences one at a time - NO overlap."""
+        while True:
+            sentence = self.audio_queue.get()
+            if sentence is None:
+                break
+            
+            self.is_speaking = True
+            cmd = [
+                "espeak-ng",
+                "-s", str(Config.ESPEAK_SPEED),
+                "-v", Config.ESPEAK_VOICE,
+                sentence
+            ]
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.is_speaking = False
+            self.audio_queue.task_done()
+    
+    def speak(self, text):
+        """Add text to speaking queue."""
+        if text and text.strip():
+            self.audio_queue.put(text.strip())
+    
+    def wait_until_done(self):
+        """Wait for all speech to finish."""
+        self.audio_queue.join()
+    
+    def shutdown(self):
+        """Shutdown the TTS engine."""
+        self.audio_queue.put(None)
+
+# =========================
+# SPEECH-TO-TEXT (Vosk)
+# =========================
+class STTEngine:
+    """Vosk-based speech recognition."""
+    
+    def __init__(self):
+        self.model = None
+        self.recognizer = None
+        self.mic = None
+        self.stream = None
+        self._initialize()
+    
+    def _initialize(self):
+        """Initialize Vosk model and microphone."""
+        try:
+            print("📦 Loading Vosk model...")
+            self.model = Model(str(Config.VOSK_MODEL_PATH))
+            self.recognizer = KaldiRecognizer(self.model, Config.VOSK_SAMPLE_RATE)
+            
+            print("🎤 Initializing microphone...")
+            self.mic = pyaudio.PyAudio()
+            self.stream = self.mic.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=Config.VOSK_SAMPLE_RATE,
+                input=True,
+                frames_per_buffer=Config.VOSK_BUFFER_SIZE
+            )
+            self.stream.start_stream()
+            print("✓ STT ready")
+        except Exception as e:
+            print(f"⚠️ STT initialization failed: {e}")
+            self.model = None
+    
+    def listen(self, timeout=10):
+        """Listen for speech and return transcribed text."""
+        if not self.model:
+            return None
+        
+        print("\n🎤 Listening... (speak now)")
+        start_time = time.time()
+        
+        try:
+            while time.time() - start_time < timeout:
+                data = self.stream.read(Config.VOSK_BUFFER_SIZE, exception_on_overflow=False)
+                
+                if self.recognizer.AcceptWaveform(data):
+                    result = json.loads(self.recognizer.Result())
+                    text = result.get('text', '').strip()
+                    
+                    if text:
+                        print(f"✓ You said: '{text}'")
+                        return text
+                
+                # Check partial results for better responsiveness
+                partial = json.loads(self.recognizer.PartialResult())
+                partial_text = partial.get('partial', '')
+                if partial_text and time.time() - start_time > 2:
+                    # If we have partial text after 2 seconds, wait a bit more
+                    time.sleep(0.5)
+            
+            print("⏱️ Listening timeout")
+            return None
+            
+        except Exception as e:
+            print(f"⚠️ Listening error: {e}")
+            return None
+    
+    def cleanup(self):
+        """Cleanup audio resources."""
+        if self.stream:
+            self.stream.stop_stream()
+            self.stream.close()
+        if self.mic:
+            self.mic.terminate()
+
+# =========================
+# LLM ASSISTANT (llama.cpp)
+# =========================
+class LLMAssistant:
+    """Streaming LLM assistant with espeak-ng TTS."""
+    
+    def __init__(self, tts_engine):
+        self.tts = tts_engine
+        self.llm = None
+        self.messages = []
+        self._initialize()
+    
+    def _initialize(self):
+        """Initialize LLM model."""
+        try:
+            print("🧠 Loading LLM model...")
+            self.llm = Llama(
+                model_path=str(Config.LLM_MODEL_PATH),
+                n_ctx=Config.LLM_CONTEXT,
+                n_threads=Config.LLM_THREADS,
+                n_gpu_layers=0,
+                verbose=False
+            )
+            
+            # Warm-up
+            self.llm.create_chat_completion(
+                messages=[{"role": "user", "content": "Hi"}],
+                max_tokens=5
+            )
+            print("✓ LLM ready")
+            
+        except Exception as e:
+            print(f"⚠️ LLM initialization failed: {e}")
+            self.llm = None
+    
+    def start_conversation(self):
+        """Start a new conversation with system prompt."""
+        self.messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are an in-car voice assistant designed to keep a driver awake and alert. "
+                    "Rules:\n"
+                    "- Be calm, brief, and supportive\n"
+                    "- Keep responses under 2-3 sentences\n"
+                    "- Ask ONE simple question at a time\n"
+                    "- Suggest gentle activities to stay alert\n"
+                    "- Use a friendly, conversational tone\n"
+                    "- Never be alarmist or stressful"
+                )
+            },
+            {
+                "role": "user",
+                "content": "I am feeling drowsy while driving"
+            }
+        ]
+    
+    def get_response_streaming(self, user_message=None):
+        """Get streaming response from LLM with real-time TTS."""
+        if not self.llm:
+            return "Sorry, the assistant is not available."
+        
+        if user_message:
+            self.messages.append({"role": "user", "content": user_message})
+            print(f"\n👤 You: {user_message}")
+        
+        print("🤖 Assistant: ", end="", flush=True)
+        
+        stream = self.llm.create_chat_completion(
+            messages=self.messages,
+            temperature=0.6,
+            max_tokens=Config.LLM_MAX_TOKENS,
+            stream=True
+        )
+        
+        buffer = ""
+        full_response = ""
+        
+        for chunk in stream:
+            delta = chunk["choices"][0]["delta"]
+            if "content" not in delta:
+                continue
+            
+            token = delta["content"]
+            print(token, end="", flush=True)
+            
+            buffer += token
+            full_response += token
+            
+            # Speak complete sentences immediately
+            if any(p in buffer for p in [".", "!", "?"]):
+                sentence = buffer.strip()
+                buffer = ""
+                if sentence:
+                    self.tts.speak(sentence)
+        
+        # Speak remaining buffer
+        if buffer.strip():
+            self.tts.speak(buffer.strip())
+        
+        print()  # New line
+        
+        # Add to conversation history
+        self.messages.append({"role": "assistant", "content": full_response})
+        
+        return full_response
+
+# =========================
+# HELPER FUNCTIONS
+# =========================
+def euclidean(p1, p2):
+    """Calculate Euclidean distance between two points."""
+    return np.linalg.norm(np.array(p1) - np.array(p2))
+
+def eye_aspect_ratio(landmarks, idx):
+    """Calculate Eye Aspect Ratio (EAR)."""
+    p1, p2, p3, p4, p5, p6 = [landmarks[i] for i in idx]
+    return (euclidean(p2, p6) + euclidean(p3, p5)) / (2.0 * euclidean(p1, p4))
+
+def mouth_aspect_ratio(landmarks):
+    """Calculate Mouth Aspect Ratio (MAR)."""
+    return euclidean(landmarks[13], landmarks[14]) / euclidean(landmarks[61], landmarks[291])
+
+# =========================
+# INITIALIZATION
+# =========================
+def initialize_mediapipe():
+    """Initialize MediaPipe face mesh (optimized for RPi)."""
+    mp_face = mp.solutions.face_mesh
+    face_mesh = mp_face.FaceMesh(
+        max_num_faces=1,
+        refine_landmarks=False,  # Disable for speed
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5
+    )
+    return face_mesh
+
+def initialize_camera():
+    """Initialize camera with RPi-optimized settings."""
+    cap = cv2.VideoCapture(0)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, Config.CAMERA_WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, Config.CAMERA_HEIGHT)
+    cap.set(cv2.CAP_PROP_FPS, Config.CAMERA_FPS)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce latency
+    return cap
+
+def initialize_state_variables():
+    """Initialize all state tracking variables."""
+    return {
+        'ear_window': deque(),
+        'pitch_window': deque(),
+        'closed_window': deque(),
+        'blink_times': deque(),
+        'blink_durations': deque(),
+        'yawn_times': deque(),
+        'eye_closed_start': None,
+        'blink_start': None,
+        'yawn_start': None,
+        'head_down_start': None,
+        'head_roll_start': None,
+        'llm_triggered': False,
+        'drowsy_count': 0,
+        'window_start_time': time.time()
+    }
+
+# =========================
+# DETECTION FUNCTIONS
+# =========================
+def process_eye_metrics(landmarks, state, now):
+    """Process eye-related metrics and detect microsleep."""
+    ear = (eye_aspect_ratio(landmarks, LEFT_EYE) +
+           eye_aspect_ratio(landmarks, RIGHT_EYE)) / 2
+
+    state['ear_window'].append((now, ear))
+    state['closed_window'].append((now, ear < Config.EAR_THRESH))
+
+    if ear < Config.EAR_THRESH:
+        if state['eye_closed_start'] is None:
+            state['eye_closed_start'] = now
+            state['blink_start'] = now
+    else:
+        if state['eye_closed_start']:
+            duration = now - state['blink_start']
+            state['blink_times'].append(now)
+            state['blink_durations'].append(duration)
+            state['eye_closed_start'] = None
+
+    microsleep = (state['eye_closed_start'] is not None and 
+                  (now - state['eye_closed_start'] >= Config.MICROSLEEP_TIME))
+    return ear, microsleep
+
+def process_mouth_metrics(landmarks, state, now):
+    """Process mouth metrics and detect yawning."""
+    mar = mouth_aspect_ratio(landmarks)
+    if mar > Config.MAR_THRESH:
+        if state['yawn_start'] is None:
+            state['yawn_start'] = now
+    else:
+        if state['yawn_start'] and now - state['yawn_start'] > 1.0:
+            state['yawn_times'].append(now)
+        state['yawn_start'] = None
+    return mar
+
+def process_head_pitch(landmarks, state, now):
+    """Process head pitch (downward tilt) detection."""
+    nose_y = landmarks[NOSE_TIP][1]
+    eye_mid_y = (landmarks[LEFT_EYE_CORNER][1] + landmarks[RIGHT_EYE_CORNER][1]) / 2
+    face_height = abs(landmarks[FOREHEAD][1] - landmarks[CHIN][1])
+
+    pitch = (nose_y - eye_mid_y) / face_height
+    state['pitch_window'].append((now, pitch))
+
+    head_down = False
+    if pitch > Config.HEAD_DOWN_THRESH:
+        if state['head_down_start'] is None:
+            state['head_down_start'] = now
+        elif now - state['head_down_start'] > Config.HEAD_DOWN_TIME:
+            head_down = True
+    else:
+        state['head_down_start'] = None
+
+    return head_down
+
+def process_head_roll(landmarks, state, now):
+    """Process head roll (tilt) detection."""
+    dx = landmarks[RIGHT_EYE_CORNER][0] - landmarks[LEFT_EYE_CORNER][0]
+    dy = landmarks[RIGHT_EYE_CORNER][1] - landmarks[LEFT_EYE_CORNER][1]
+    roll = abs(np.degrees(np.arctan2(dy, dx)))
+
+    head_roll = False
+    if roll > Config.HEAD_ROLL_THRESH:
+        if state['head_roll_start'] is None:
+            state['head_roll_start'] = now
+        elif now - state['head_roll_start'] > Config.ROLL_TIME:
+            head_roll = True
+    else:
+        state['head_roll_start'] = None
+
+    return head_roll
+
+def cleanup_windows(state, now):
+    """Remove old entries from time windows."""
+    while state['ear_window'] and now - state['ear_window'][0][0] > Config.WINDOW_TIME:
+        state['ear_window'].popleft()
+    while state['pitch_window'] and now - state['pitch_window'][0][0] > Config.WINDOW_TIME:
+        state['pitch_window'].popleft()
+    while state['closed_window'] and now - state['closed_window'][0][0] > Config.WINDOW_TIME:
+        state['closed_window'].popleft()
+    while state['blink_times'] and now - state['blink_times'][0] > Config.WINDOW_TIME:
+        state['blink_times'].popleft()
+    while state['blink_durations'] and len(state['blink_durations']) > len(state['blink_times']):
+        state['blink_durations'].popleft()
+    while state['yawn_times'] and now - state['yawn_times'][0] > Config.WINDOW_TIME:
+        state['yawn_times'].popleft()
+
+def calculate_metrics(state, microsleep, head_down, head_roll):
+    """Calculate drowsiness metrics and score."""
+    perclos = (sum(v for _, v in state['closed_window']) / len(state['closed_window']) 
+               if state['closed_window'] else 0)
+    blink_rate = len(state['blink_times'])
+    slow_blinks = sum(d > Config.SLOW_BLINK_TIME for d in state['blink_durations'])
+    ear_std = np.std([v for _, v in state['ear_window']]) if state['ear_window'] else 0
+    pitch_var = np.var([v for _, v in state['pitch_window']]) if state['pitch_window'] else 0
+
+    drowsy_score = min(1.0, (
+        0.20 * perclos +
+        0.15 * int(microsleep) +
+        0.15 * min(slow_blinks / 5, 1.0) +
+        0.10 * min(ear_std / 0.12, 1.0) +
+        0.10 * min(pitch_var / 0.015, 1.0) +
+        0.20 * int(head_down) +
+        0.10 * int(head_roll)
+    ))
+
+    return {
+        'perclos': perclos,
+        'blink_rate': blink_rate,
+        'slow_blinks': slow_blinks,
+        'ear_std': ear_std,
+        'pitch_var': pitch_var,
+        'drowsy_score': drowsy_score
+    }
+
+def draw_overlay(frame, metrics, ear, mar, microsleep, head_down, head_roll, state, drowsy_state):
+    """Draw metrics overlay on the frame."""
+    y = 25
+    font_scale = 0.5  # Smaller for RPi
+    thickness = 1
+    
+    EYE_COLOR = (255, 0, 0)
+    MOUTH_COLOR = (0, 0, 255)
+    HEAD_COLOR = (0, 255, 0)
+
+    texts = [
+        (f"PERCLOS: {metrics['perclos']:.2f}", EYE_COLOR),
+        (f"Blinks: {metrics['blink_rate']}", EYE_COLOR),
+        (f"EAR: {ear:.3f}", EYE_COLOR),
+        (f"MAR: {mar:.3f}", MOUTH_COLOR),
+        (f"Yawns: {len(state['yawn_times'])}", MOUTH_COLOR),
+        (f"Microsleep: {microsleep}", EYE_COLOR),
+        (f"Head Down: {head_down}", HEAD_COLOR),
+    ]
+
+    drowsy_color = (0, 255, 0) if drowsy_state == "ALERT" else (0, 0, 255)
+    texts.append((f"Score: {metrics['drowsy_score']:.2f} ({drowsy_state})", drowsy_color))
+
+    for text, color in texts:
+        cv2.putText(frame, text, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 
+                    font_scale, color, thickness)
+        y += 20
+
+# =========================
+# MAIN DETECTION LOOP
+# =========================
+def run_detection_loop(cap, face_mesh, state):
+    """Run the main drowsiness detection loop."""
+    frame_skip = 2  # Process every Nth frame for speed
+    frame_count = 0
+    
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        frame_count += 1
+        if frame_count % frame_skip != 0:
+            continue  # Skip frame
+
+        now = time.time()
+        
+        # Resize for faster processing
+        small_frame = cv2.resize(frame, (320, 240))
+        rgb = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
+        results = face_mesh.process(rgb)
+        
+        h, w = Config.CAMERA_HEIGHT, Config.CAMERA_WIDTH
+
+        microsleep = False
+        head_down = False
+        head_roll = False
+        ear = 0
+        mar = 0
+
+        if results.multi_face_landmarks:
+            lm = results.multi_face_landmarks[0].landmark
+            landmarks = [(int(p.x * w), int(p.y * h)) for p in lm]
+
+            # Process all detections
+            ear, microsleep = process_eye_metrics(landmarks, state, now)
+            mar = process_mouth_metrics(landmarks, state, now)
+            head_down = process_head_pitch(landmarks, state, now)
+            head_roll = process_head_roll(landmarks, state, now)
+
+        # Cleanup old data
+        cleanup_windows(state, now)
+
+        # Calculate metrics
+        metrics = calculate_metrics(state, microsleep, head_down, head_roll)
+
+        # Determine state
+        drowsy_state = "ALERT"
+        if metrics['drowsy_score'] > Config.DROWSY_THRESHOLD:
+            drowsy_state = "DROWSY"
+            state['drowsy_count'] += 1
+
+        # Draw overlay
+        draw_overlay(frame, metrics, ear, mar, microsleep, head_down, 
+                     head_roll, state, drowsy_state)
+
+        cv2.imshow("Driver Drowsiness Monitor", frame)
+
+        key = cv2.waitKey(1) & 0xFF
+        if key == 27:  # ESC
+            print("📊 Monitoring ended by user")
+            return False
+
+        # Check if LLM should be triggered
+        if (state['drowsy_count'] >= Config.DROWSY_TRIGGER_COUNT and 
+            drowsy_state == "DROWSY" and 
+            not state['llm_triggered']):
+            state['llm_triggered'] = True
+            return True
+
+    return False
+
+# =========================
+# LLM CONVERSATION
+# =========================
+def run_llm_conversation(tts, stt, llm_assistant):
+    """Run interactive voice conversation with LLM."""
+    print("\n" + "="*60)
+    print("🚨 DROWSINESS DETECTED - Starting Assistant")
+    print("="*60)
+    
+    tts.speak("I notice you're feeling drowsy. Let me help you stay alert.")
+    
+    # Start conversation
+    llm_assistant.start_conversation()
+    
+    # Get initial response
+    llm_assistant.get_response_streaming()
+    tts.wait_until_done()
+    
+    # Conversation loop
+    max_turns = 5
+    turn = 0
+    
+    while turn < max_turns:
+        # Listen for user input
+        user_input = stt.listen(timeout=15)
+        
+        if user_input is None:
+            tts.speak("I didn't catch that. Are you still there?")
+            tts.wait_until_done()
+            user_input = stt.listen(timeout=10)
+            
+            if user_input is None:
+                print("⚠️ No response - ending conversation")
+                tts.speak("Okay, resuming monitoring. Stay safe!")
+                tts.wait_until_done()
+                break
+        
+        # Check for exit commands
+        if any(word in user_input.lower() for word in ['exit', 'quit', 'bye', 'stop', 'goodbye']):
+            print("🔚 User ended conversation")
+            tts.speak("Alright, drive safely!")
+            tts.wait_until_done()
+            break
+        
+        # Get LLM response
+        llm_assistant.get_response_streaming(user_input)
+        tts.wait_until_done()
+        
+        turn += 1
+    
+    print("\n" + "="*60)
+    print("✓ Conversation ended - Resuming monitoring")
+    print("="*60)
+
+# =========================
+# MAIN FUNCTION
+# =========================
+def main():
+    """Main function to run the drowsiness detection system."""
+    print("\n" + "="*60)
+    print("🚗 Driver Drowsiness Detection System V2")
+    print("   Optimized for Raspberry Pi 4B")
+    print("="*60 + "\n")
+    
+    # Initialize components
+    tts = TTSEngine()
+    stt = STTEngine()
+    llm_assistant = LLMAssistant(tts)
+    
+    cap = initialize_camera()
+    face_mesh = initialize_mediapipe()
+    state = initialize_state_variables()
+
+    print("✓ System ready - Starting monitoring...")
+    tts.speak("Drowsiness monitoring system activated.")
+
+    try:
+        while True:
+            # Run detection loop
+            should_trigger_llm = run_detection_loop(cap, face_mesh, state)
+
+            if not should_trigger_llm:
+                break
+
+            # Stop detection resources
+            cap.release()
+            face_mesh.close()
+            cv2.destroyAllWindows()
+
+            # Run LLM conversation
+            run_llm_conversation(tts, stt, llm_assistant)
+
+            # Restart detection
+            try:
+                cap = initialize_camera()
+                face_mesh = initialize_mediapipe()
+                state['llm_triggered'] = False
+                state['drowsy_count'] = 0
+                time.sleep(0.5)
+                print("\n✓ Monitoring resumed\n")
+            except Exception as e:
+                print(f'⚠️ Failed to restart: {e}')
+                break
+
+    except KeyboardInterrupt:
+        print("\n\n⚠️ System interrupted by user")
+    
+    finally:
+        # Cleanup
+        print("\n🔄 Cleaning up resources...")
+        cap.release()
+        face_mesh.close()
+        cv2.destroyAllWindows()
+        stt.cleanup()
+        tts.shutdown()
+        print("✓ Cleanup complete")
+
+if __name__ == "__main__":
+    main()
