@@ -1,94 +1,79 @@
 #!/usr/bin/env python3
 """
-ACTUALLY WORKING Streaming TTS (eSpeak NG)
-Audio starts IMMEDIATELY while LLM generates
-Optimized for Raspberry Pi
+CLEAN Streaming TTS (NO OVERLAP)
+- Uses eSpeak NG
+- Sentence-based splitting
+- Single playback queue
+- Audio is ALWAYS understandable
 """
 
 import time
 import subprocess
 import threading
-from pathlib import Path
+import queue
 from llama_cpp import Llama
+from pathlib import Path
 
-# ============================================
-# CONFIGURATION
-# ============================================
-HOME = Path.home()
-LLM_MODEL_PATH = HOME / "Sentinel" / "modls" / "granite-3.0-1b-a400m-instruct.Q4_K_M.gguf"
+# ===============================
+# CONFIG
+# ===============================
+LLM_MODEL_PATH = Path.home() / "Sentinel" / "modls" / "granite-3.0-1b-a400m-instruct.Q4_K_M.gguf"
 
 LLM_THREADS = 3
-CHUNK_SIZE = 8  # smaller = faster speech start
 
-# ============================================
-# INSTANT AUDIO (eSpeak NG)
-# ============================================
+# ===============================
+# AUDIO QUEUE WORKER
+# ===============================
+audio_queue = queue.Queue()
 
-def play_audio_async(text, chunk_id):
-    """
-    Fire-and-forget speech.
-    Returns immediately.
-    """
-    def _speak():
-        if not text.strip():
-            return
-
-        # Slight pause smoothing
-        text_clean = text.replace("\n", " ").strip()
+def audio_worker():
+    """Plays sentences one at a time — NO overlap."""
+    while True:
+        sentence = audio_queue.get()
+        if sentence is None:
+            break
 
         cmd = [
             "espeak-ng",
-            "-s", "165",        # speed (words/min)
-            "-v", "en-us",      # voice
-            text_clean
+            "-s", "165",      # speed
+            "-v", "en-us",
+            sentence
         ]
-
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        audio_queue.task_done()
 
-    thread = threading.Thread(target=_speak, daemon=True)
-    thread.start()
-    return thread
+# Start audio worker thread
+threading.Thread(target=audio_worker, daemon=True).start()
 
-# ============================================
-# STREAMING LLM + AUDIO
-# ============================================
-
-def stream_with_immediate_audio(llm, user_message):
+# ===============================
+# STREAMING + SENTENCE SPLIT
+# ===============================
+def stream_with_clean_audio(llm, user_message):
     messages = [
         {
             "role": "system",
             "content": (
-                "You are an in-car safety assistant. "
-                "Keep responses under 2 sentences. "
-                "Speak clearly and urgently but calm."
+                "You are an in-car assistant keeping a driver awake. "
+                "Be calm, brief, and supportive. Max 2 sentences."
             )
         },
-        {
-            "role": "user",
-            "content": user_message
-        }
+        {"role": "user", "content": user_message}
     ]
 
-    print("\n" + "─" * 60)
-    print(f"User: {user_message}")
-    print("─" * 60)
-    print("Assistant: ", end="", flush=True)
-
-    start_time = time.time()
-    first_audio_time = None
-    generation_done = None
+    print("\nUser:", user_message)
+    print("Assistant:", end=" ", flush=True)
 
     stream = llm.create_chat_completion(
         messages=messages,
         temperature=0.6,
-        max_tokens=60,
+        max_tokens=80,
         stream=True
     )
 
-    buffer = []
-    audio_threads = []
-    chunk_count = 0
+    buffer = ""
     full_response = ""
+    first_audio_time = None
+    start_time = time.time()
 
     for chunk in stream:
         delta = chunk["choices"][0]["delta"]
@@ -96,67 +81,43 @@ def stream_with_immediate_audio(llm, user_message):
             continue
 
         token = delta["content"]
-        full_response += token
         print(token, end="", flush=True)
 
-        words = token.split()
-        buffer.extend(words)
+        buffer += token
+        full_response += token
 
-        if len(buffer) >= CHUNK_SIZE:
-            chunk_text = " ".join(buffer[:CHUNK_SIZE])
-            buffer = buffer[CHUNK_SIZE:]
-            chunk_count += 1
+        # Sentence boundary detected
+        if any(p in buffer for p in [".", "!", "?"]):
+            sentence = buffer.strip()
+            buffer = ""
 
-            if first_audio_time is None:
-                first_audio_time = time.time()
-                print("\n[🔊 Speaking while generating...]\nAssistant: ", end="", flush=True)
+            if sentence:
+                audio_queue.put(sentence)
 
-            t = play_audio_async(chunk_text, chunk_count)
-            audio_threads.append(t)
+                if first_audio_time is None:
+                    first_audio_time = time.time()
+                    print("\n[🔊 Speaking...]\nAssistant:", end=" ", flush=True)
 
-    generation_done = time.time()
+    # Speak remaining buffer
+    if buffer.strip():
+        audio_queue.put(buffer.strip())
 
-    # Speak leftover words
-    if buffer:
-        chunk_count += 1
-        t = play_audio_async(" ".join(buffer), chunk_count)
-        audio_threads.append(t)
-
-    print("\n")
-
-    for t in audio_threads:
-        t.join(timeout=3)
+    audio_queue.join()
 
     end_time = time.time()
 
-    print("\n" + "=" * 60)
-    print("⏱️ TIMING")
-    print("=" * 60)
-    print(f"LLM Generation: {(generation_done - start_time)*1000:.0f} ms")
-    print(f"First Audio:     {(first_audio_time - start_time)*1000:.0f} ms")
-    print(f"Total Time:     {(end_time - start_time)*1000:.0f} ms")
-    print(f"Chunks Spoken:  {chunk_count}")
-
-    if first_audio_time and first_audio_time < generation_done:
-        print("\n✅ TRUE STREAMING CONFIRMED")
-    else:
-        print("\n⚠️ Audio waited for generation")
+    print("\n")
+    print("⏱ Timing:")
+    print(f"  First audio: {(first_audio_time - start_time)*1000:.0f} ms")
+    print(f"  Total time: {(end_time - start_time)*1000:.0f} ms")
 
     return full_response
 
-# ============================================
+# ===============================
 # MAIN
-# ============================================
-
+# ===============================
 def main():
-    print("\n" + "#" * 60)
-    print("# STREAMING LLM + eSpeak NG")
-    print("# Ultra-low latency TTS for Raspberry Pi")
-    print("#" * 60)
-
     print("\nLoading LLM...")
-    start = time.time()
-
     llm = Llama(
         model_path=str(LLM_MODEL_PATH),
         n_ctx=2048,
@@ -165,8 +126,6 @@ def main():
         verbose=False
     )
 
-    print(f"LLM loaded in {time.time() - start:.1f}s")
-
     # Warm-up
     llm.create_chat_completion(
         messages=[{"role": "user", "content": "Hello"}],
@@ -174,13 +133,13 @@ def main():
     )
 
     prompts = [
-        "I'm feeling sleepy while driving",
-        "Help me stay awake",
-        "I need to stay alert right now"
+        "I'm feeling drowsy while driving",
+        "I've been on the road for hours",
+        "Help me stay awake"
     ]
 
     for p in prompts:
-        stream_with_immediate_audio(llm, p)
+        stream_with_clean_audio(llm, p)
         time.sleep(2)
 
 if __name__ == "__main__":
