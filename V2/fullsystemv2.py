@@ -616,12 +616,12 @@ def run_llm_conversation(tts, stt, llm_assistant):
     
     while turn < max_turns:
         # Listen with 20 second timeout
-        user_input = stt.listen(timeout=20)
+        user_input = stt.listen()
         
         if user_input is None:
             tts.speak("Are you still there?")
             tts.wait_until_done()
-            user_input = stt.listen(timeout=15)
+            user_input = stt.listen()
             
             if user_input is None:
                 print("⚠️ No response - ending conversation")
