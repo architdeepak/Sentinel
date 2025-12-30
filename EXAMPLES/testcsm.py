@@ -4,6 +4,8 @@ Sesame CSM TTS Test Script
 Testing contextual speech generation on Raspberry Pi
 """
 
+#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
+
 import torch
 import torchaudio
 import time
