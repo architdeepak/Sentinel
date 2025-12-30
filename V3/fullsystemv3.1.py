@@ -805,3 +805,5 @@ def main():
         stt.cleanup()
         tts.shutdown()
         print("✓ Cleanup complete")
+if __name__ == "__main__":
+    main()
