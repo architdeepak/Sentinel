@@ -190,13 +190,17 @@ class STTEngine:
 # =========================
 # LLM ASSISTANT (Groq API)
 # =========================
+# =========================
+# LLM ASSISTANT WITH BINARY STATE
+# =========================
 class LLMAssistant:
-    """LLM using Groq API for fast inference."""
+    """LLM using Groq API with drowsiness metrics as context."""
     
     def __init__(self, tts_engine):
         self.tts = tts_engine
         self.client = None
         self.messages = []
+        self.initial_metrics = None
         self._initialize()
     
     def _initialize(self):
@@ -209,27 +213,130 @@ class LLMAssistant:
             print(f"⚠️ Groq initialization failed: {e}")
             self.client = None
     
-    def start_conversation(self):
-        """Start a new conversation with system prompt."""
+    def start_conversation(self, metrics, state):
+        """
+        Start a new conversation with detection metrics as context.
+        
+        Args:
+            metrics: Dict with drowsy_score, perclos, blink_rate, etc.
+            state: State dict with yawn_times, eye_closed_start, etc.
+        """
+        # Store initial metrics
+        self.initial_metrics = {
+            'drowsy_score': metrics['drowsy_score'],
+            'perclos': metrics['perclos'],
+            'blink_rate': metrics['blink_rate'],
+            'yawn_count': len(state['yawn_times']),
+            'microsleep': state['eye_closed_start'] is not None
+        }
+        
+        # Build system prompt with metrics
+        system_prompt = f"""You are Sentinel, an AI safety companion in a car. Your ONLY job is to help drowsy drivers regain alertness through engaging conversation. You were just activated because the driver crossed the drowsiness threshold.
+
+## Current Driver State (Detection Metrics)
+```
+STATUS: DROWSY (threshold exceeded)
+DROWSINESS SCORE: {metrics['drowsy_score']:.2f} / 1.00
+EYE CLOSURE (PERCLOS): {metrics['perclos']:.2f}
+BLINK RATE (last 10s): {metrics['blink_rate']}
+YAWN COUNT (last 10s): {len(state['yawn_times'])}
+MICROSLEEP DETECTED: {state['eye_closed_start'] is not None}
+```
+
+**What this means:** The driver is showing clear signs of drowsiness and needs engagement to regain full alertness.
+
+## Your Mission
+Engage the driver in conversation to restore their alertness. Use a combination of mental activation, light conversation, and physical prompts. Adapt your intensity based on the metrics above and their responses.
+
+## Core Rules (ALWAYS follow):
+1. **Keep responses SHORT** - Maximum 2-3 sentences per response
+2. **Ask ONE clear question** per turn
+3. **Be warm and supportive** - Never alarming, panicky, or lecturing
+4. **Vary your approach** - Don't repeat the same types of questions
+5. **Read the room** - If they sound slow/tired, increase engagement; if alert, maintain current level
+6. **Know when to exit** - If they sound consistently alert, prepare to end conversation
+
+## Engagement Toolkit (use variety!)
+
+### 🧠 Mental Activation
+Keep their mind working with quick, easy tasks:
+- "Quick - what exit number are you passing?"
+- "Name 3 things you can see that are blue"
+- "What's half of 26?"
+- "Count backwards from 15 by 2s"
+- "What's playing on the radio?"
+- "Spell your destination backwards"
+
+### 💬 Light Conversation
+Simple topics that don't require deep thought:
+- "How much longer until you arrive?"
+- "What's the first thing you'll do when you get there?"
+- "Is the traffic moving okay?"
+- "What's the weather like ahead?"
+- "Planning to stop for coffee soon?"
+
+### 💪 Physical Activation
+Suggest simple actions that increase alertness:
+- "Try rolling down your window for some fresh air"
+- "Take a deep breath in... hold it... exhale slowly"
+- "Adjust your seat position if you're getting stiff"
+- "Crank up the AC or open a window"
+- "Can you grip the steering wheel tighter for 5 seconds?"
+
+### ⚡ Quick Decision Making
+Simple choices that engage their brain:
+- "Coffee or energy drink at the next stop?"
+- "Want me to tell you a fact or ask you a trivia question?"
+- "Music up or window down?"
+
+## Conversation Strategy
+
+### Opening (First Response)
+Start warm and check in:
+- "Hey! I noticed you're showing signs of drowsiness. How are you feeling?"
+- "I'm here to help keep you alert. How's the drive going?"
+
+### Building Engagement
+Mix it up based on their responses:
+- If they respond quickly/clearly → Light conversation
+- If they respond slowly/quietly → Mental tasks, physical prompts
+- If they don't respond → Simpler yes/no questions
+
+### Closing (When They're Alert)
+- "You sound much more alert now! I'll keep monitoring quietly."
+- "Great! You're doing well. I'll stay quiet but I'm still watching."
+
+## Adapting to Metrics
+
+**If PERCLOS is high (>0.30):** Eyes closing frequently
+→ "Open that window right now, get some air!"
+
+**If multiple yawns detected:**
+→ "I counted those yawns. How about pulling over for 5 minutes?"
+
+**If microsleep detected:**
+→ "Hey! I need you alert right now. Tell me where you are."
+
+**If score is very high (>0.70):**
+→ Suggest pulling over: "I'm concerned. Can you pull over safely in the next mile?"
+
+## What NOT to Do
+❌ Don't ask complex questions
+❌ Don't discuss emotional/heavy topics
+❌ Don't lecture or scold
+❌ Don't mention technical metrics
+❌ Don't be repetitive
+❌ Don't create anxiety
+❌ Don't talk for too long
+
+## Remember
+You're a supportive companion. Keep it brief, varied, and engaging. Your goal is to restore alertness without becoming a distraction."""
+
+        # Initialize conversation
         self.messages = [
             {
                 "role": "system",
-                "content": (
-                    "You are an in-car voice assistant designed to keep a driver awake and alert.\n\n"
-                    "YOUR SPEAKING STYLE:\n"
-                    "- Keep responses SHORT (1-3 sentences) unless the driver asks for details\n"
-                    "- Be calm, supportive, and conversational\n"
-                    "- Ask ONE simple question at a time\n"
-                    "- Use natural, friendly language\n"
-                    "- Never be alarmist or stressful\n\n"
-                    "YOUR STRATEGIES:\n"
-                    "- Engage the driver in light conversation\n"
-                    "- Suggest gentle activities: rolling down window, adjusting temperature, light stretches\n"
-                    "- Ask about their destination, plans, interests\n"
-                    "- Recommend taking a break if very drowsy\n"
-                    "- Keep them mentally active with simple questions\n\n"
-                    "Remember: Short and sweet is better. Only elaborate if asked."
-                )
+                "content": system_prompt
             },
             {
                 "role": "user",
@@ -238,7 +345,7 @@ class LLMAssistant:
         ]
     
     def get_response_streaming(self, user_message=None):
-        """Get response from Groq and speak it smoothly."""
+        """Get response from Groq and speak it."""
         if not self.client:
             return "Sorry, the assistant is not available."
         
@@ -249,19 +356,19 @@ class LLMAssistant:
         print("🤖 Assistant: ", end="", flush=True)
         
         try:
-            # Get complete response (Groq is fast enough)
+            # Get response from Groq
             response = self.client.chat.completions.create(
                 model=Config.GROQ_MODEL,
                 messages=self.messages,
                 temperature=0.7,
                 max_tokens=150,
-                stream=False  # No streaming needed
+                stream=False
             )
             
             full_response = response.choices[0].message.content
             print(full_response)
             
-            # Speak the entire response smoothly
+            # Speak the response
             self.tts.speak(full_response)
             
             # Add to conversation history
@@ -271,7 +378,20 @@ class LLMAssistant:
             
         except Exception as e:
             print(f"\n⚠️ API error: {e}")
-            return "Sorry, I'm having trouble connecting right now."
+            fallback = "I'm having trouble connecting. How are you feeling right now?"
+            self.tts.speak(fallback)
+            return fallback
+    
+    def should_end_conversation(self, turn_count, max_turns=8):
+        """
+        Determine if conversation should end.
+        
+        Simple version - can enhance with response analysis.
+        """
+        if turn_count >= max_turns:
+            return True, "max_turns_reached"
+        
+        return False, None
 
 # =========================
 # HELPER FUNCTIONS
@@ -484,6 +604,7 @@ def run_detection_loop(cap, face_mesh, state):
     """Run the main drowsiness detection loop."""
     frame_skip = 2
     frame_count = 0
+    final_metrics = None  # Store metrics when drowsiness triggers
     
     while cap.isOpened():
         ret, frame = cap.read()
@@ -524,6 +645,8 @@ def run_detection_loop(cap, face_mesh, state):
         if metrics['drowsy_score'] > Config.DROWSY_THRESHOLD:
             drowsy_state = "DROWSY"
             state['drowsy_count'] += 1
+            # Store the metrics for when we trigger conversation
+            final_metrics = metrics.copy()
 
         draw_overlay(frame, metrics, ear, mar, microsleep, head_down, 
                      head_roll, state, drowsy_state)
@@ -533,28 +656,46 @@ def run_detection_loop(cap, face_mesh, state):
         key = cv2.waitKey(1) & 0xFF
         if key == 27:
             print("📊 Monitoring ended by user")
-            return False
+            return False, None
 
         if (state['drowsy_count'] >= Config.DROWSY_TRIGGER_COUNT and 
             drowsy_state == "DROWSY" and 
             not state['llm_triggered']):
             state['llm_triggered'] = True
-            return True
+            return True, final_metrics  # Return the metrics!
 
-    return False
+    return False, None
 
 # =========================
 # LLM CONVERSATION
 # =========================
-def run_llm_conversation(tts, stt, llm_assistant):
-    """Run interactive voice conversation with LLM."""
+def run_llm_conversation(tts, stt, llm_assistant, final_metrics, state):
+    """
+    Run interactive voice conversation with LLM.
+    
+    Args:
+        tts: TTS engine
+        stt: STT engine  
+        llm_assistant: LLM assistant instance
+        final_metrics: The metrics dict when drowsiness was detected
+        state: The state dict with yawn_times, eye_closed_start, etc.
+    """
     print("\n" + "="*60)
     print("🚨 DROWSINESS DETECTED - Starting Assistant")
     print("="*60)
+    print(f"Drowsiness Score: {final_metrics['drowsy_score']:.2f}")
+    print(f"PERCLOS: {final_metrics['perclos']:.2f}")
+    print(f"Blinks: {final_metrics['blink_rate']}")
+    print(f"Yawns: {len(state['yawn_times'])}")
+    print("="*60)
     
+    # Initial TTS alert
     tts.speak("I notice you're feeling drowsy. Let me help you stay alert.")
     
-    llm_assistant.start_conversation()
+    # Start conversation with metrics as context
+    llm_assistant.start_conversation(final_metrics, state)
+    
+    # Get first LLM response (uses the "I am feeling drowsy" user message)
     llm_assistant.get_response_streaming()
     tts.wait_until_done()
     
@@ -565,14 +706,16 @@ def run_llm_conversation(tts, stt, llm_assistant):
         turn += 1
         print(f"\n--- Turn {turn}/{max_turns} ---")
         
-        user_input = stt.listen(timeout=20, show_diagnostics=True)
+        # Listen for user response
+        user_input = stt.listen(timeout=20, show_diagnostics=False)
         
         if user_input is None:
             print("⚠️ No input detected")
             tts.speak("I didn't hear anything. Are you still there?")
             tts.wait_until_done()
             
-            user_input = stt.listen(timeout=10, show_diagnostics=True)
+            # Second attempt
+            user_input = stt.listen(timeout=10, show_diagnostics=False)
             
             if user_input is None:
                 print("⚠️ No response after two attempts - ending conversation")
@@ -580,19 +723,25 @@ def run_llm_conversation(tts, stt, llm_assistant):
                 tts.wait_until_done()
                 break
         
-        if any(word in user_input.lower() for word in ['exit', 'quit', 'bye', 'stop', 'goodbye', 'done', 'enough']):
-            print("🔚 User ended conversation")
-            tts.speak("Alright, drive safely!")
+        # Check for exit keywords
+        if any(word in user_input.lower() for word in ['exit', 'quit', 'bye', 'stop', 'goodbye', 'done', 'enough', 'fine', 'alert', "i'm good", "im good"]):
+            print("🔚 User indicated they're alert")
+            tts.speak("Great! You sound much better. I'll keep monitoring quietly.")
             tts.wait_until_done()
             break
         
+        # Get LLM response based on user input
         llm_assistant.get_response_streaming(user_input)
         tts.wait_until_done()
-    
-    if turn >= max_turns:
-        print(f"🔚 Reached {max_turns} turns")
-        tts.speak("Let's resume monitoring now. Drive safely!")
-        tts.wait_until_done()
+        
+        # Check if should end (can be enhanced with response analysis)
+        should_end, reason = llm_assistant.should_end_conversation(turn, max_turns)
+        if should_end:
+            if reason == "max_turns_reached":
+                print(f"🔚 Reached {max_turns} turns")
+                tts.speak("You're sounding much more alert. I'll keep monitoring quietly. Drive safe!")
+                tts.wait_until_done()
+            break
     
     print("\n" + "="*60)
     print("✓ Conversation ended - Resuming monitoring")
@@ -606,6 +755,7 @@ def main():
     print("\n" + "="*60)
     print("🚗 Driver Drowsiness Detection System V3")
     print("   With Edge-TTS & Groq API")
+    print("   Context-Aware Engagement")
     print("="*60 + "\n")
     
     tts = TTSEngine()
@@ -621,7 +771,7 @@ def main():
 
     try:
         while True:
-            should_trigger_llm = run_detection_loop(cap, face_mesh, state)
+            should_trigger_llm, final_metrics = run_detection_loop(cap, face_mesh, state)
 
             if not should_trigger_llm:
                 break
@@ -630,7 +780,8 @@ def main():
             face_mesh.close()
             cv2.destroyAllWindows()
 
-            run_llm_conversation(tts, stt, llm_assistant)
+            # Pass metrics to conversation!
+            run_llm_conversation(tts, stt, llm_assistant, final_metrics, state)
 
             try:
                 cap = initialize_camera()
@@ -654,6 +805,3 @@ def main():
         stt.cleanup()
         tts.shutdown()
         print("✓ Cleanup complete")
-
-if __name__ == "__main__":
-    main()
