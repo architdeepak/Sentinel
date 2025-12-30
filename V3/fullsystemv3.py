@@ -25,11 +25,11 @@ from groq import Groq
 # =========================
 class Config:
     # API Keys (set these as environment variables or here)
-    GROQ_API_KEY = "your_groq_api_key_here"  # Get free at console.groq.com
+    GROQ_API_KEY = "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"  # Get free at console.groq.com
     
     # API settings
     GROQ_MODEL = "llama-3.1-8b-instant"  # Fast and good quality
-    EDGE_TTS_VOICE = "en-US-JennyNeural"  # Options: AriaNeural, GuyNeural, JennyNeural
+    EDGE_TTS_VOICE = "en-US-GuyNeural"  # Options: AriaNeural, GuyNeural, JennyNeural
     EDGE_TTS_RATE = "+20%"  # Speed adjustment
     
     # Camera settings (RPi optimization)
