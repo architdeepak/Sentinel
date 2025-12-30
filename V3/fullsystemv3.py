@@ -25,12 +25,12 @@ from groq import Groq
 # =========================
 class Config:
     # API Keys (set these as environment variables or here)
-    GROQ_API_KEY = "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"  # Get free at console.groq.com
+    GROQ_API_KEY = "your_groq_api_key_here"  # Get free at console.groq.com
     
     # API settings
     GROQ_MODEL = "llama-3.1-8b-instant"  # Fast and good quality
-    EDGE_TTS_VOICE = "en-US-AriaNeural"  # Options: AriaNeural, GuyNeural, JennyNeural
-    EDGE_TTS_RATE = "+15%"  # Speed adjustment
+    EDGE_TTS_VOICE = "en-US-JennyNeural"  # Options: AriaNeural, GuyNeural, JennyNeural
+    EDGE_TTS_RATE = "+20%"  # Speed adjustment
     
     # Camera settings (RPi optimization)
     CAMERA_WIDTH = 480
@@ -238,7 +238,7 @@ class LLMAssistant:
         ]
     
     def get_response_streaming(self, user_message=None):
-        """Get streaming response from Groq with real-time TTS."""
+        """Get response from Groq and speak it smoothly."""
         if not self.client:
             return "Sorry, the assistant is not available."
         
@@ -249,38 +249,20 @@ class LLMAssistant:
         print("🤖 Assistant: ", end="", flush=True)
         
         try:
-            # Create streaming completion
-            stream = self.client.chat.completions.create(
+            # Get complete response (Groq is fast enough)
+            response = self.client.chat.completions.create(
                 model=Config.GROQ_MODEL,
                 messages=self.messages,
                 temperature=0.7,
                 max_tokens=150,
-                stream=True
+                stream=False  # No streaming needed
             )
             
-            buffer = ""
-            full_response = ""
+            full_response = response.choices[0].message.content
+            print(full_response)
             
-            for chunk in stream:
-                if chunk.choices[0].delta.content:
-                    token = chunk.choices[0].delta.content
-                    print(token, end="", flush=True)
-                    
-                    buffer += token
-                    full_response += token
-                    
-                    # Speak complete sentences immediately
-                    if any(p in buffer for p in [".", "!", "?"]):
-                        sentence = buffer.strip()
-                        buffer = ""
-                        if sentence:
-                            self.tts.speak(sentence)
-            
-            # Speak remaining buffer
-            if buffer.strip():
-                self.tts.speak(buffer.strip())
-            
-            print()  # New line
+            # Speak the entire response smoothly
+            self.tts.speak(full_response)
             
             # Add to conversation history
             self.messages.append({"role": "assistant", "content": full_response})
