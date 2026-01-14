@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""
-Driver Drowsiness Detection System V3
-With Edge-TTS and Groq API Integration
-Optimized for Raspberry Pi 4B
-"""
 
 import cv2
 import mediapipe as mp
@@ -16,13 +11,9 @@ import asyncio
 from pathlib import Path
 import speech_recognition as sr
 
-# New imports for APIs
 import edge_tts
 from groq import Groq
 
-# =========================
-# CONFIGURATION
-# =========================
 class Config:
     # API Keys (set these as environment variables or here)
     GROQ_API_KEY = "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"  # Get free at console.groq.com

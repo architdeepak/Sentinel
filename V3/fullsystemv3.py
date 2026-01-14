@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""
-Driver Drowsiness Detection System V3
-With Edge-TTS and Groq API Integration
-Optimized for Raspberry Pi 4B
-"""
 
 import cv2
 import mediapipe as mp
@@ -16,23 +11,17 @@ import asyncio
 from pathlib import Path
 import speech_recognition as sr
 
-# New imports for APIs
 import edge_tts
 from groq import Groq
 
-# Import configuration with secure API key management
 from config import Config
 
-# Validate that required API keys are configured
 try:
     Config.validate()
 except ValueError as e:
     print(str(e))
     exit(1)
 
-# =========================
-# LANDMARKS CONSTANTS
-# =========================
 LEFT_EYE = [362, 385, 387, 263, 373, 380]
 RIGHT_EYE = [33, 160, 158, 133, 153, 144]
 LEFT_EYE_CORNER = 33
@@ -42,9 +31,6 @@ FOREHEAD = 10
 CHIN = 152
 MOUTH_LANDMARKS = [13, 14, 61, 291]
 
-# =========================
-# TEXT-TO-SPEECH (Edge-TTS)
-# =========================
 class TTSEngine:
     """High-quality TTS using Microsoft Edge-TTS API."""
     
