@@ -15,9 +15,13 @@ import speech_recognition as sr
 import edge_tts
 from groq import Groq
 
+import os
+from dotenv import load_dotenv
+load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
+
 class Config:
-    # API Keys (set these as environment variables or here)
-    GROQ_API_KEY = "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"  # Get free at console.groq.com
+    # API Keys (loaded from .env file)
+    GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
     
     # API settings
     GROQ_MODEL = "llama-3.1-8b-instant"  # Fast and good quality

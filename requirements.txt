@@ -8,3 +8,6 @@ pyaudio
 vosk
 piper-tts 
 llama-cpp-python
+edge-tts
+groq
+python-dotenv

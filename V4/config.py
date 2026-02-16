@@ -1,11 +1,16 @@
-"""
-Configuration for Driver Drowsiness Detection System V3.2
-"""
+"""Configuration for Driver Drowsiness Detection System V4"""
+
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Load .env from project root (parent of V4/)
+load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
 
 
 class Config:
-    # API Keys (set these as environment variables or here)
-    GROQ_API_KEY = "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"  # Get free at console.groq.com
+    # API Keys (loaded from .env file — never hardcode these!)
+    GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
     # API settings
     GROQ_MODEL = "llama-3.1-8b-instant"  # Fast and good quality
