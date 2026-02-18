@@ -308,8 +308,22 @@ class DetectionThread:
         """Background loop with its own camera and FaceMesh (thread-safe)."""
         import mediapipe as mp
 
-        # Create thread-local resources
-        cap = cv2.VideoCapture(0)
+        # Create thread-local resources with retry
+        # (camera may not be released instantly by the main thread)
+        cap = None
+        for attempt in range(5):
+            cap = cv2.VideoCapture(0)
+            if cap.isOpened():
+                break
+            cap.release()
+            print(f"🔍 Camera not ready, retrying ({attempt + 1}/5)...")
+            time.sleep(0.5)
+
+        if cap is None or not cap.isOpened():
+            print("⚠️ DetectionThread: failed to open camera after 5 attempts — running without live detection")
+            self._running = False
+            return
+
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, Config.CAMERA_WIDTH)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, Config.CAMERA_HEIGHT)
         cap.set(cv2.CAP_PROP_FPS, Config.CAMERA_FPS)
