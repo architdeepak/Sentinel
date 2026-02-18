@@ -15,7 +15,7 @@ class Config:
     # API settings
     GROQ_MODEL = "llama-3.3-70b-versatile"  # Fast and good quality
     EDGE_TTS_VOICE = "en-US-JennyNeural"  # Options: AriaNeural, GuyNeural, JennyNeural
-    EDGE_TTS_RATE = "+25%"  # Speed adjustment
+    EDGE_TTS_RATE = "+35%"  # Speed adjustment
 
     # Camera settings (RPi optimization)
     CAMERA_WIDTH = 480

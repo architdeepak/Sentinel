@@ -241,6 +241,7 @@ You are an anti-drowsiness tool AND a companion who knows this driver. Balance a
             full_response = ""
             sentence_buffer = ""
             sentence_endings = {'.', '!', '?'}
+            sentences_in_buffer = 0
 
             for chunk in stream:
                 token = chunk.choices[0].delta.content
@@ -264,9 +265,13 @@ You are an anti-drowsiness tool AND a companion who knows this driver. Balance a
                 # Check if we hit a sentence boundary
                 stripped = sentence_buffer.strip()
                 if stripped and stripped[-1] in sentence_endings:
-                    # Send completed sentence to TTS immediately
-                    self.tts.speak(stripped)
-                    sentence_buffer = ""
+                    sentences_in_buffer += 1
+                    # Send first sentence immediately for lowest latency,
+                    # then batch every 2 sentences to reduce TTS API calls
+                    if sentences_in_buffer >= 2 or (sentences_in_buffer == 1 and len(full_response) == len(sentence_buffer)):
+                        self.tts.speak(stripped)
+                        sentence_buffer = ""
+                        sentences_in_buffer = 0
 
             # Flush any remaining text that didn't end with punctuation
             remaining = sentence_buffer.strip()

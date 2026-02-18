@@ -270,6 +270,10 @@ def main():
 
     finally:
         print("\n🔄 Cleaning up resources...")
+        # Save any unsaved memory learnings before exiting
+        if llm_assistant.memory_manager.current_session_learnings:
+            print("💾 Saving conversation learnings before exit...")
+            llm_assistant.memory_manager.apply_session_learnings()
         cap.release()
         face_mesh.close()
         cv2.destroyAllWindows()
