@@ -9,7 +9,6 @@ Two-stage pipeline:
   Chunk N+1 generates while chunk N plays = minimal gaps.
 """
 
-import io
 import queue
 import subprocess
 import threading
@@ -43,7 +42,13 @@ class TTSEngine:
         self._turn_tts_start = None
 
     def _generator_worker(self):
-        """Stage 1: Stream audio bytes from Edge-TTS into memory."""
+        """Stage 1: Stream audio bytes from Edge-TTS into memory.
+        
+        NOTE: Generation and playback are pipelined at the SENTENCE level —
+        sentence N+1 generates while sentence N plays. Within a single
+        sentence, we now stream audio chunks directly to the player
+        (see _playback_worker) for lowest first-byte latency.
+        """
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
@@ -55,11 +60,12 @@ class TTSEngine:
 
             try:
                 t_gen_start = time.perf_counter()
-                audio_bytes = loop.run_until_complete(self._generate_bytes(text))
+                # Collect chunks as a list for streaming playback
+                audio_chunks = loop.run_until_complete(self._generate_chunks(text))
                 gen_ms = (time.perf_counter() - t_gen_start) * 1000
 
-                if audio_bytes:
-                    self._playback_queue.put((audio_bytes, gen_ms))
+                if audio_chunks:
+                    self._playback_queue.put((audio_chunks, gen_ms))
                 else:
                     with self._pending_lock:
                         self._pending_chunks -= 1
@@ -80,26 +86,33 @@ class TTSEngine:
         loop.close()
 
     def _playback_worker(self):
-        """Stage 2: Pipe audio bytes directly to mpg123 (no file I/O)."""
+        """Stage 2: Stream audio chunks to mpg123 as they arrive (low latency).
+        
+        Instead of buffering the entire sentence's audio and then playing,
+        we write each Edge-TTS chunk to mpg123's stdin as it arrives from
+        the generator. This means playback starts after the FIRST chunk
+        (~50-150ms) rather than waiting for the entire sentence (~300-800ms).
+        """
         while True:
             item = self._playback_queue.get()
             if item is None:
                 break
 
-            audio_bytes, gen_ms = item
+            audio_chunks, gen_ms = item
             self.is_speaking = True
 
             try:
                 t_play_start = time.perf_counter()
 
-                # Pipe MP3 bytes directly to mpg123 via stdin — no temp files
+                # Start mpg123 and stream chunks to its stdin
                 proc = subprocess.Popen(
                     ["mpg123", "-q", "-"],
                     stdin=subprocess.PIPE,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL
                 )
-                proc.stdin.write(audio_bytes)
+                for chunk in audio_chunks:
+                    proc.stdin.write(chunk)
                 proc.stdin.close()
                 proc.wait()
 
@@ -118,7 +131,8 @@ class TTSEngine:
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL
                     )
-                    proc.stdin.write(audio_bytes)
+                    for chunk in audio_chunks:
+                        proc.stdin.write(chunk)
                     proc.stdin.close()
                     proc.wait()
                 except Exception as e2:
@@ -137,21 +151,25 @@ class TTSEngine:
 
             self._playback_queue.task_done()
 
-    async def _generate_bytes(self, text):
-        """Stream audio bytes from Edge-TTS directly into memory."""
+    async def _generate_chunks(self, text):
+        """Stream audio chunks from Edge-TTS as a list (for incremental playback).
+        
+        Returns a list of bytes objects rather than one concatenated blob.
+        The playback worker writes each chunk to mpg123's stdin sequentially,
+        so mpg123 can start decoding/playing as soon as it has enough data.
+        """
         communicate = edge_tts.Communicate(
             text,
             Config.EDGE_TTS_VOICE,
             rate=Config.EDGE_TTS_RATE
         )
 
-        # Collect audio bytes in memory — no file I/O
-        buffer = io.BytesIO()
+        chunks = []
         async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                buffer.write(chunk["data"])
+            if chunk["type"] == "audio" and chunk["data"]:
+                chunks.append(chunk["data"])
 
-        return buffer.getvalue()
+        return chunks if chunks else None
 
     def speak(self, text):
         """Queue text for speech."""

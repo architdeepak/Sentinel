@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Conversation Pipeline End-to-End Test (V4 Cloud)
+Conversation Pipeline End-to-End Test (V5)
 =================================================
 Tests the full conversation loop: STT → Groq LLM → Edge-TTS
 WITHOUT needing a camera or drowsiness detection.
@@ -30,7 +30,7 @@ import time
 import shutil
 from pathlib import Path
 
-# Ensure V4 modules are importable
+# Ensure V5 modules are importable
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from config import Config
@@ -39,6 +39,7 @@ from tts_engine import TTSEngine
 from stt_engine import STTEngine
 from llm_assistant import LLMAssistant
 from metrics_logger import MetricsLogger
+from voice_features import VoiceFeatureExtractor
 
 
 # ── Fake drowsiness metrics (simulated trigger) ────────────────
@@ -145,6 +146,7 @@ def run_single_trial(trial_id, driver_type="new", max_turns=8):
     # ── Initialize engines ──
     tts = TTSEngine()
     stt = STTEngine()
+    voice_extractor = VoiceFeatureExtractor()
     llm = LLMAssistant(tts, memory)
 
     # ── Create and attach metrics logger ──
@@ -169,6 +171,7 @@ def run_single_trial(trial_id, driver_type="new", max_turns=8):
     logger.start_turn(0)
     opening = llm.get_response_streaming()
     tts.wait_until_done()
+    voice_extractor.mark_prompt_end()
     
     # Ask for quality rating
     _ask_quality_rating(logger)
@@ -179,8 +182,8 @@ def run_single_trial(trial_id, driver_type="new", max_turns=8):
         print(f"\n─── Turn {turn} ───")
         logger.start_turn(turn)
 
-        # Listen
-        user_input = stt.listen(timeout=20, show_diagnostics=False)
+        # Listen (V5: returns (text, audio) tuple)
+        user_input, audio_data = stt.listen(timeout=20, show_diagnostics=False)
 
         if not user_input:
             print("⚠️  No speech detected")
@@ -188,8 +191,9 @@ def run_single_trial(trial_id, driver_type="new", max_turns=8):
 
             tts.speak("Are you still there? Give me a quick response.")
             tts.wait_until_done()
+            voice_extractor.mark_prompt_end()
             
-            user_input = stt.listen(timeout=15, show_diagnostics=False)
+            user_input, audio_data = stt.listen(timeout=15, show_diagnostics=False)
             if not user_input:
                 print("⚠️  Still nothing — ending conversation")
                 logger.end_turn()
@@ -202,9 +206,26 @@ def run_single_trial(trial_id, driver_type="new", max_turns=8):
             logger.end_turn()
             break
 
-        # LLM response
-        response = llm.get_response_streaming(user_input)
+        # Extract voice features (V5)
+        voice_context = None
+        if audio_data is not None:
+            features = voice_extractor.extract_features(audio_data, user_input)
+            if features:
+                voice_context = voice_extractor.format_for_llm(features)
+
+        # Simulated live drowsy score (no camera in test mode)
+        # Starts at the fake trigger score and drifts down slightly each turn
+        # to simulate the driver getting more alert during conversation
+        simulated_score = max(0.30, FAKE_METRICS["drowsy_score"] - (turn * 0.04))
+
+        # LLM response (V5: with voice context + simulated live score)
+        response = llm.get_response_streaming(
+            user_message=user_input,
+            live_score=simulated_score,
+            voice_context=voice_context,
+        )
         tts.wait_until_done()
+        voice_extractor.mark_prompt_end()
 
         # Quality rating
         _ask_quality_rating(logger)
@@ -215,8 +236,8 @@ def run_single_trial(trial_id, driver_type="new", max_turns=8):
     # ── End conversation ──
     logger.end_conversation()
 
-    # Apply memory learnings
-    memory.apply_session_learnings()
+    # Apply memory learnings (V5: LLM-based extraction)
+    memory.extract_and_apply_learnings()
     memory.log_conversation_metadata(FAKE_METRICS, llm.conversation_turns)
 
     # Ask which facts the user actually shared

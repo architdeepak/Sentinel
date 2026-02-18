@@ -1,8 +1,8 @@
 """
-Metrics Logger for Conversation Pipeline End-to-End Testing (V4).
+Metrics Logger for Conversation Pipeline End-to-End Testing (V5).
 Logs per-turn and per-conversation timing, accuracy, and quality metrics.
 
-Output: JSON log files in V4/test_logs/ directory.
+Output: JSON log files in V5/test_logs/ directory.
 """
 
 import json
