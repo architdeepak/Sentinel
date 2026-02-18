@@ -6,6 +6,7 @@ Uses Microsoft Edge-TTS for high-quality neural voice synthesis.
 import queue
 import threading
 import asyncio
+import time
 from pathlib import Path
 
 import edge_tts
@@ -23,6 +24,8 @@ class TTSEngine:
         self.is_speaking = False
         self._chunk_counter = 0  # Unique temp file per chunk to avoid conflicts
         self._lock = threading.Lock()
+        self.metrics_logger = None  # Set externally for benchmarking
+        self._turn_tts_start = None  # Track TTS timing across chunks in a turn
 
     def _get_temp_path(self):
         """Get a unique temp file path for each audio chunk."""
@@ -46,15 +49,24 @@ class TTSEngine:
             temp_file = self._get_temp_path()
             try:
                 # Generate speech with Edge-TTS
+                t_gen_start = time.perf_counter()
                 loop.run_until_complete(self._generate_speech(text, temp_file))
+                gen_ms = (time.perf_counter() - t_gen_start) * 1000
 
                 # Play using mpg123 (lightweight MP3 player for RPi)
                 import subprocess
+                t_play_start = time.perf_counter()
                 subprocess.run(
                     ["mpg123", "-q", str(temp_file)],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL
                 )
+                play_ms = (time.perf_counter() - t_play_start) * 1000
+
+                # Report to metrics logger if attached
+                if self.metrics_logger:
+                    self.metrics_logger.log_tts_generation(gen_ms)
+                    self.metrics_logger.log_tts_playback(play_ms)
 
             except Exception as e:
                 print(f"⚠️ TTS error: {e}")
@@ -81,11 +93,19 @@ class TTSEngine:
     def speak(self, text):
         """Queue text for speech."""
         if text and text.strip():
+            # Mark turn TTS start on first chunk
+            if self._turn_tts_start is None:
+                self._turn_tts_start = time.perf_counter()
             self.audio_queue.put(text.strip())
 
     def wait_until_done(self):
         """Wait for all speech to finish."""
         self.audio_queue.join()
+        # Log total TTS time for this turn
+        if self._turn_tts_start is not None and self.metrics_logger:
+            total_ms = (time.perf_counter() - self._turn_tts_start) * 1000
+            self.metrics_logger.log_tts_total(total_ms)
+        self._turn_tts_start = None
 
     def shutdown(self):
         """Shutdown TTS."""

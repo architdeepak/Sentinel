@@ -3,6 +3,7 @@ Speech-to-Text Engine for Driver Drowsiness Detection System V3.2
 Uses Google Speech Recognition via the SpeechRecognition library.
 """
 
+import time
 import speech_recognition as sr
 
 
@@ -12,6 +13,7 @@ class STTEngine:
     def __init__(self):
         self.recognizer = sr.Recognizer()
         self.mic = None
+        self.metrics_logger = None   # Set externally for benchmarking
         self._initialize()
 
     def _initialize(self):
@@ -36,6 +38,7 @@ class STTEngine:
         if show_diagnostics:
             print("   [Listening with Google STT]")
 
+        t_start = time.perf_counter()
         try:
             with self.mic as source:
                 self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
@@ -43,7 +46,13 @@ class STTEngine:
 
             print("🔄 Processing speech...")
             text = self.recognizer.recognize_google(audio)
-            print(f"✓ You said: '{text}'")
+            latency_ms = (time.perf_counter() - t_start) * 1000
+            print(f"✓ You said: '{text}'  ({latency_ms:.0f}ms)")
+
+            # Report to metrics logger if attached
+            if self.metrics_logger:
+                self.metrics_logger.log_stt(latency_ms, text)
+
             return text
 
         except sr.WaitTimeoutError:

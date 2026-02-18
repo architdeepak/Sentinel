@@ -3,6 +3,7 @@ LLM Assistant for Driver Drowsiness Detection System V3.2
 Uses Groq API with drowsiness metrics and driver memory as context.
 """
 
+import time
 from groq import Groq
 
 from config import Config
@@ -18,6 +19,7 @@ class LLMAssistant:
         self.messages = []
         self.initial_metrics = {}
         self.conversation_turns = 0  # Track conversation length
+        self.metrics_logger = None   # Set externally for benchmarking
         self._initialize()
 
     def _initialize(self):
@@ -213,15 +215,21 @@ You are an anti-drowsiness tool AND a companion who knows this driver. Balance a
             self.messages.append({"role": "user", "content": user_message})
             print(f"\n👤 You: {user_message}")
 
-            # Extract learnings from user input
+            # Also log extracted learnings to metrics if present
             learnings = self.memory_manager.extract_learnings_from_text(user_message)
             if learnings:
                 print(f"📚 Learned: {len(learnings)} new facts")
+                if self.metrics_logger:
+                    self.metrics_logger.log_facts_extracted(learnings)
 
         print("🤖 Assistant: ", end="", flush=True)
 
         try:
             # Stream response token by token
+            t_api_start = time.perf_counter()
+            first_token_logged = False
+            token_count = 0
+
             stream = self.client.chat.completions.create(
                 model=Config.GROQ_MODEL,
                 messages=self.messages,
@@ -239,6 +247,15 @@ You are an anti-drowsiness tool AND a companion who knows this driver. Balance a
                 if token is None:
                     continue
 
+                # Log time-to-first-token
+                if not first_token_logged:
+                    first_token_ms = (time.perf_counter() - t_api_start) * 1000
+                    if self.metrics_logger:
+                        self.metrics_logger.log_groq_first_token(first_token_ms)
+                    first_token_logged = True
+
+                token_count += 1
+
                 # Print token immediately for console feedback
                 print(token, end="", flush=True)
                 full_response += token
@@ -255,6 +272,11 @@ You are an anti-drowsiness tool AND a companion who knows this driver. Balance a
             remaining = sentence_buffer.strip()
             if remaining:
                 self.tts.speak(remaining)
+
+            # Log full response timing
+            full_latency_ms = (time.perf_counter() - t_api_start) * 1000
+            if self.metrics_logger:
+                self.metrics_logger.log_groq_complete(full_latency_ms, token_count, full_response)
 
             print()  # Newline after streaming
 
