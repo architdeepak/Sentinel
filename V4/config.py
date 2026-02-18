@@ -13,7 +13,7 @@ class Config:
     GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
     # API settings
-    GROQ_MODEL = "llama-3.1-8b-instant"  # Fast and good quality
+    GROQ_MODEL = "llama-3.1-70b-versatile"  # Fast and good quality
     EDGE_TTS_VOICE = "en-US-JennyNeural"  # Options: AriaNeural, GuyNeural, JennyNeural
     EDGE_TTS_RATE = "+25%"  # Speed adjustment
 

@@ -47,6 +47,9 @@ class MemoryManager:
                 "family": [],
                 "location": None
             },
+            "preferences": {
+                "engagement_style": None
+            },
             "interests": {
                 "hobbies": [],
                 "sports_teams": [],
@@ -107,6 +110,11 @@ class MemoryManager:
             summary_lines.append(f"Family: {', '.join(personal['family'])}")
         if personal.get("location"):
             summary_lines.append(f"Location: {personal['location']}")
+
+        # Preferences
+        preferences = self.profile.get("preferences", {})
+        if preferences.get("engagement_style"):
+            summary_lines.append(f"Preferred engagement style: {preferences['engagement_style']}")
 
         # Interests
         interests = self.profile.get("interests", {})
@@ -177,6 +185,16 @@ class MemoryManager:
                     destination = user_text.lower().split(phrase, 1)[1].strip().split('.')[0].split(',')[0].strip()
                     if len(destination) < 30:
                         learnings.append(("driving_patterns", "usual_destinations", destination))
+
+        # Extract engagement style preference
+        conversation_keywords = ["conversation", "talk", "chat", "questions", "ask me"]
+        action_keywords = ["actions", "exercises", "physical", "suggestions", "tips", "stories", "story", "tell me"]
+        if any(kw in text_lower for kw in conversation_keywords):
+            if any(word in text_lower for word in ["prefer", "like", "want", "love", "enjoy", "rather", "go with", "let's do", "choose"]):
+                learnings.append(("preferences", "engagement_style", "conversation"))
+        if any(kw in text_lower for kw in action_keywords):
+            if any(word in text_lower for word in ["prefer", "like", "want", "love", "enjoy", "rather", "go with", "let's do", "choose"]):
+                learnings.append(("preferences", "engagement_style", "actions"))
 
         # Store learnings for this session
         self.current_session_learnings.extend(learnings)
