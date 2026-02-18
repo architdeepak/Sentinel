@@ -199,7 +199,13 @@ You are an anti-drowsiness tool AND a companion who knows this driver. Balance a
         ]
 
     def get_response_streaming(self, user_message=None):
-        """Get response from Groq, extract learnings, and speak it."""
+        """Stream response from Groq, speaking each sentence as it completes.
+        
+        Streams LLM tokens in real-time, buffers until a sentence boundary
+        (. ? ! or newline), then immediately queues that sentence for TTS
+        while continuing to stream the next sentence. This means the driver
+        hears the first sentence almost instantly.
+        """
         if not self.client:
             return "Sorry, the assistant is not available."
 
@@ -215,23 +221,45 @@ You are an anti-drowsiness tool AND a companion who knows this driver. Balance a
         print("🤖 Assistant: ", end="", flush=True)
 
         try:
-            # Get complete response
-            response = self.client.chat.completions.create(
+            # Stream response token by token
+            stream = self.client.chat.completions.create(
                 model=Config.GROQ_MODEL,
                 messages=self.messages,
                 temperature=0.7,
                 max_tokens=150,
-                stream=False
+                stream=True
             )
 
-            full_response = response.choices[0].message.content
-            print(full_response)
+            full_response = ""
+            sentence_buffer = ""
+            sentence_endings = {'.', '!', '?'}
+
+            for chunk in stream:
+                token = chunk.choices[0].delta.content
+                if token is None:
+                    continue
+
+                # Print token immediately for console feedback
+                print(token, end="", flush=True)
+                full_response += token
+                sentence_buffer += token
+
+                # Check if we hit a sentence boundary
+                stripped = sentence_buffer.strip()
+                if stripped and stripped[-1] in sentence_endings:
+                    # Send completed sentence to TTS immediately
+                    self.tts.speak(stripped)
+                    sentence_buffer = ""
+
+            # Flush any remaining text that didn't end with punctuation
+            remaining = sentence_buffer.strip()
+            if remaining:
+                self.tts.speak(remaining)
+
+            print()  # Newline after streaming
 
             # Track conversation turns
             self.conversation_turns += 1
-
-            # Speak the entire response smoothly
-            self.tts.speak(full_response)
 
             # Add to conversation history
             self.messages.append({"role": "assistant", "content": full_response})
