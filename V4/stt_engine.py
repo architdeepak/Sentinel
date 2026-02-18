@@ -21,6 +21,13 @@ class STTEngine:
         try:
             print("🎤 Initializing microphone...")
             self.mic = sr.Microphone()
+
+            # Allow longer pauses before considering speech "done"
+            # Default 0.8s is way too short — drivers pause to think
+            self.recognizer.pause_threshold = 2.5    # seconds of silence before phrase ends
+            self.recognizer.phrase_threshold = 0.3    # min seconds of audio to consider speech
+            self.recognizer.non_speaking_duration = 1.5  # seconds of silence to keep on buffer edges
+
             with self.mic as source:
                 self.recognizer.adjust_for_ambient_noise(source, duration=1)
             print("✓ Microphone ready")
