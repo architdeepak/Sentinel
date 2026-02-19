@@ -1,0 +1,159 @@
+{
+  "trial_id": "new_902",
+  "driver_type": "new",
+  "timestamp": "2026-02-19T11:57:10.998032",
+  "turns": [
+    {
+      "turn": 0,
+      "turn_start": 1134.206718699,
+      "stt_latency_ms": null,
+      "stt_text": null,
+      "stt_done_time": null,
+      "groq_latency_ms": 439.9,
+      "groq_full_latency_ms": 764.4,
+      "groq_tokens": 74,
+      "tts_generation_ms": 323.3,
+      "tts_playback_ms": 16438.7,
+      "tts_total_ms": 16762.5,
+      "user_to_speech_ms": null,
+      "total_turnaround_ms": 19205.4,
+      "llm_response": "Hey there, I'm Sentinel, your alertness co-pilot. You're starting to drift a little, so let's get ahead of it. Roll that window down and take a big deep breath in through your nose, hold it for 4 seconds, and blow it out hard through your mouth. What's your name, and where are you headed tonight?",
+      "llm_quality_rating": null,
+      "memory_facts_extracted_this_turn": 0
+    },
+    {
+      "turn": 1,
+      "turn_start": 1153.412400171,
+      "stt_latency_ms": 6880.2,
+      "stt_text": "And I'm headed to McDonald's.",
+      "stt_done_time": 1160.296182052,
+      "groq_latency_ms": 367.0,
+      "groq_full_latency_ms": 698.7,
+      "groq_tokens": 65,
+      "tts_generation_ms": 267.4,
+      "tts_playback_ms": 12612.3,
+      "tts_total_ms": 12880.3,
+      "user_to_speech_ms": 977.1,
+      "total_turnaround_ms": 22650.3,
+      "llm_response": "Let's get that blood flow going. Sit up straight, push your shoulders back, and grip the steering wheel tightly for 5 seconds. Now, tell me, what's your go-to order at McDonald's? Try to name it quickly, and let's see if we can get that heart rate up a bit.",
+      "llm_quality_rating": 4,
+      "memory_facts_extracted_this_turn": 0
+    },
+    {
+      "turn": 2,
+      "turn_start": 1176.36296629,
+      "stt_latency_ms": 12275.3,
+      "stt_text": "McChicken's and my name's Archit.",
+      "stt_done_time": 1188.638561604,
+      "groq_latency_ms": 386.1,
+      "groq_full_latency_ms": 787.4,
+      "groq_tokens": 62,
+      "tts_generation_ms": 338.8,
+      "tts_playback_ms": 15148.6,
+      "tts_total_ms": 15488.0,
+      "user_to_speech_ms": 1139.9,
+      "total_turnaround_ms": 30696.9,
+      "llm_response": "Hey Archit, nice to meet you. I need you to stay with me here. Roll your window down a bit more, feel that cool air on your face. Now, let's get your brain engaged - can you spell \"McChicken\" backwards for me, and try to do it quickly?",
+      "llm_quality_rating": 4,
+      "memory_facts_extracted_this_turn": 0
+    },
+    {
+      "turn": 3,
+      "turn_start": 1207.360265096,
+      "stt_latency_ms": 9065.3,
+      "stt_text": "N I h c e n c m",
+      "stt_done_time": 1216.425982297,
+      "groq_latency_ms": 5467.8,
+      "groq_full_latency_ms": 5847.4,
+      "groq_tokens": 60,
+      "tts_generation_ms": 419.1,
+      "tts_playback_ms": 12546.0,
+      "tts_total_ms": 12965.7,
+      "user_to_speech_ms": 6299.9,
+      "total_turnaround_ms": 31552.0,
+      "llm_response": "Close enough, Archit! You're getting those neurons firing again. Now, let's get you moving a bit. Wiggle your toes inside your shoes, and tap your hands on the steering wheel to the beat of your favorite song - what's a song that always gets you pumped up?",
+      "llm_quality_rating": 4,
+      "memory_facts_extracted_this_turn": 0
+    },
+    {
+      "turn": 4,
+      "turn_start": 1239.212712389,
+      "stt_latency_ms": 5751.6,
+      "stt_text": "Exit",
+      "stt_done_time": 1254.28657182,
+      "groq_latency_ms": null,
+      "groq_full_latency_ms": null,
+      "groq_tokens": 0,
+      "tts_generation_ms": 505.0,
+      "tts_playback_ms": 3497.2,
+      "tts_total_ms": 4002.7,
+      "user_to_speech_ms": 505.6,
+      "total_turnaround_ms": 15074.0,
+      "llm_response": null,
+      "llm_quality_rating": null,
+      "memory_facts_extracted_this_turn": 0
+    }
+  ],
+  "facts_shared": [
+    "name",
+    "engagement preference (conversation vs actions)"
+  ],
+  "facts_extracted": [],
+  "summary": {
+    "trial_id": "new_902",
+    "driver_type": "new",
+    "total_turns": 5,
+    "total_conversation_ms": 120080.2,
+    "stt_latency_ms": {
+      "min": 5751.6,
+      "max": 12275.3,
+      "avg": 8493.1,
+      "count": 4
+    },
+    "groq_first_token_ms": {
+      "min": 367.0,
+      "max": 5467.8,
+      "avg": 1665.2,
+      "count": 4
+    },
+    "groq_full_response_ms": {
+      "min": 698.7,
+      "max": 5847.4,
+      "avg": 2024.5,
+      "count": 4
+    },
+    "tts_generation_ms": {
+      "min": 267.4,
+      "max": 505.0,
+      "avg": 370.7,
+      "count": 5
+    },
+    "tts_total_ms": {
+      "min": 4002.7,
+      "max": 16762.5,
+      "avg": 12419.8,
+      "count": 5
+    },
+    "user_to_speech_ms": {
+      "min": 505.6,
+      "max": 6299.9,
+      "avg": 2230.6,
+      "count": 4
+    },
+    "total_turnaround_ms": {
+      "min": 15074.0,
+      "max": 31552.0,
+      "avg": 23835.7,
+      "count": 5
+    },
+    "llm_quality_rating": {
+      "min": 4,
+      "max": 4,
+      "avg": 4.0,
+      "count": 3
+    },
+    "memory_facts_shared": 2,
+    "memory_facts_extracted": 0,
+    "memory_extraction_accuracy": 0.0
+  }
+}
