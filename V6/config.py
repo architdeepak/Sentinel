@@ -31,7 +31,8 @@ class Config:
     DEEPGRAM_STT_MODEL = "nova-3"           # Deepgram's latest/best STT model
 
     # ── Deepgram TTS settings ──
-    DEEPGRAM_TTS_VOICE = "aura-2-helena-en"  # Caring, Natural, Positive, Friendly
+    DEEPGRAM_TTS_VOICE = "aura-2-thalia-en"  # Clear, Confident, Energetic, Enthusiastic
+    DEEPGRAM_TTS_SPEED = 1.15                  # 1.0 = normal, up to 2.0 (slightly fast for alertness)
 
     # ── Camera settings (RPi optimization) ──
     CAMERA_WIDTH = 480

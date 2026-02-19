@@ -153,6 +153,7 @@ class TTSEngine:
             f"https://api.deepgram.com/v1/speak"
             f"?model={Config.DEEPGRAM_TTS_VOICE}"
             f"&encoding=mp3"
+            f"&speed={Config.DEEPGRAM_TTS_SPEED}"
         )
 
         headers = {

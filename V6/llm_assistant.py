@@ -234,14 +234,15 @@ You are an anti-drowsiness tool AND a companion who knows this driver. Balance a
     def get_response_streaming(self, user_message=None, live_score=None, voice_context=None):
         """Stream response from Groq, speaking each sentence as it completes.
 
-        V5 additions:
+        V6 changes:
           - live_score: current drowsy score from detection thread (float)
           - voice_context: string from VoiceFeatureExtractor.format_for_llm()
         Both are injected as a prefix to the user message so the LLM sees
         real-time alertness data alongside what the driver said.
 
-        Streams LLM tokens in real-time, buffers until a sentence boundary
-        (. ? ! or newline), then immediately queues that sentence for TTS.
+        Collects the full LLM response, then sends it as ONE TTS call.
+        Groq is fast enough (~200-500ms for full response) that waiting
+        is cheaper than per-sentence Deepgram round-trips.
         """
         if not self.client:
             return "Sorry, the assistant is not available."
@@ -290,8 +291,6 @@ You are an anti-drowsiness tool AND a companion who knows this driver. Balance a
             )
 
             full_response = ""
-            sentence_buffer = ""
-            sentence_endings = {'.', '!', '?'}
 
             for chunk in stream:
                 token = chunk.choices[0].delta.content
@@ -310,26 +309,10 @@ You are an anti-drowsiness tool AND a companion who knows this driver. Balance a
                 # Print token immediately for console feedback
                 print(token, end="", flush=True)
                 full_response += token
-                sentence_buffer += token
 
-                # Flush at every sentence boundary in the buffer so mid-token
-                # splits (e.g. "end! New") are caught immediately.
-                while True:
-                    # Find the earliest sentence-ending character (C-level search)
-                    indices = [sentence_buffer.find(c) for c in sentence_endings
-                               if sentence_buffer.find(c) != -1]
-                    if not indices:
-                        break
-                    idx = min(indices)
-                    chunk_text = sentence_buffer[:idx + 1].strip()
-                    if chunk_text:
-                        self.tts.speak(chunk_text)
-                    sentence_buffer = sentence_buffer[idx + 1:]
-
-            # Flush any remaining text that didn't end with punctuation
-            remaining = sentence_buffer.strip()
-            if remaining:
-                self.tts.speak(remaining)
+            # Send full response as ONE TTS call — no per-sentence gaps
+            if full_response.strip():
+                self.tts.speak(full_response.strip())
 
             # Log full response timing
             full_latency_ms = (time.perf_counter() - t_api_start) * 1000
