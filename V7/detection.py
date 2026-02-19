@@ -252,10 +252,6 @@ class DetectionThread:
         self._running = False
         self._thread = None
 
-        # These are created/destroyed within start()/stop() — NOT shared
-        self._cap = None
-        self._face_mesh = None
-
     def _init_state(self):
         """Create a fresh state dict for the detection thread (no sharing)."""
         from collections import deque
@@ -272,8 +268,6 @@ class DetectionThread:
             'yawn_start': None,
             'head_down_start': None,
             'head_roll_start': None,
-            'llm_triggered': False,
-            'drowsy_count': 0,
             'window_start_time': time.time(),
         }
 
@@ -295,11 +289,6 @@ class DetectionThread:
         # Resources are released inside _detection_loop's finally block
         print("🔍 Background detection thread stopped")
 
-    def get_latest_metrics(self):
-        """Return the most recent metrics dict (thread-safe copy)."""
-        with self._lock:
-            return self._latest_metrics.copy()
-
     def get_full_state(self):
         """Return metrics + microsleep/head_down flags (thread-safe)."""
         with self._lock:
@@ -307,11 +296,6 @@ class DetectionThread:
             m['microsleep'] = self._microsleep
             m['head_down'] = self._head_down
             return m
-
-    def get_latest_score(self):
-        """Return just the drowsy score (fast, thread-safe)."""
-        with self._lock:
-            return self._latest_metrics['drowsy_score']
 
     def _detection_loop(self):
         """Background loop with its own camera and FaceMesh (thread-safe)."""
@@ -412,7 +396,7 @@ def format_detection_for_llm(metrics, microsleep=False, head_down=False):
     metric explanations + the driver's personal baselines.
 
     Args:
-        metrics: dict from calculate_metrics() or DetectionThread.get_latest_metrics()
+        metrics: dict from calculate_metrics() or DetectionThread.get_full_state()
         microsleep: bool — True if eyes closed > 1.5s
         head_down: bool — True if head tilted down for extended period
 

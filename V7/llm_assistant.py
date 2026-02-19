@@ -25,7 +25,6 @@ class LLMAssistant:
         self.client = None
         self.messages = []
         self._system_message = None
-        self.initial_metrics = {}
         self.conversation_turns = 0
         self.metrics_logger = None
         self._session_id = None  # Set by main.py after start_session()
@@ -282,8 +281,4 @@ Match urgency to the raw detection metrics. NEVER say "I can see" — you detect
             print(f"\n⚠️ API error: {e}")
             return "Sorry, I'm having trouble connecting right now."
 
-    def should_end_conversation(self, turn_count):
-        """Determine if conversation should end."""
-        if turn_count >= Config.MAX_CONVERSATION_TURNS:
-            return True, "max_turns_reached"
-        return False, None
+

@@ -383,9 +383,9 @@ def main():
     print(f"   Sessions: {session_count}")
     if last_time:
         print(f"   Last session: {last_time}")
-    facts = memory_manager.get_context_facts(limit=5)
-    if facts:
-        print(f"   Known facts: {len(memory_manager.get_context_facts(limit=100))}")
+    fact_count = len(memory_manager.get_context_facts(limit=100))
+    if fact_count:
+        print(f"   Known facts: {fact_count}")
     print()
 
     tts = TTSEngine()

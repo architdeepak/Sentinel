@@ -38,8 +38,6 @@ class MetricsLogger:
         self.facts_extracted = []    # Facts the system extracted
 
         # LLM quality ratings (filled in manually after each turn)
-        self._quality_ratings = []
-
         print(f"📊 MetricsLogger initialized — trial: {self.trial_id}")
 
     # ── Conversation-level ──────────────────────────────────────
@@ -145,7 +143,6 @@ class MetricsLogger:
     def log_quality_rating(self, rating):
         """Log manual LLM quality rating (1-4) for current turn."""
         self._current_turn["llm_quality_rating"] = rating
-        self._quality_ratings.append(rating)
 
     # ── Summary & persistence ───────────────────────────────────
 

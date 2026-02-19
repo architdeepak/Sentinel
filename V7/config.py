@@ -58,9 +58,5 @@ class Config:
     DETECTION_THREAD_FPS = 10
     DETECTION_FRAME_SKIP = 3
 
-    # ── SQLite database ──
-    # Stored in user home dir so it persists across sessions
-    SQLITE_DB_PATH = Path.home() / "sentinel_driver.db"
-
     # ── Calibration ──
     CALIBRATION_SENTENCES = 5  # Number of sentences for voice baseline calibration

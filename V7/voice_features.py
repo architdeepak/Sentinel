@@ -131,10 +131,6 @@ class VoiceFeatureExtractor:
             return int(loud[0]) * frame_size / self._sample_rate
         return 0.0
 
-    def get_last_features(self):
-        """Return the last extracted features (cached)."""
-        return self._cached_features
-
     def format_for_llm(self, features=None, baselines=None):
         """Format voice features as raw numbers + baseline deviation.
 
