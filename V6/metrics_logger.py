@@ -61,12 +61,14 @@ class MetricsLogger:
             "turn_start": time.perf_counter(),
             "stt_latency_ms": None,
             "stt_text": None,
+            "stt_done_time": None,               # perf_counter when STT finished
             "groq_latency_ms": None,           # Time to first token
             "groq_full_latency_ms": None,       # Time to full response
             "groq_tokens": 0,
             "tts_generation_ms": None,
             "tts_playback_ms": None,
             "tts_total_ms": None,
+            "user_to_speech_ms": None,           # STT done → TTS first audio byte
             "total_turnaround_ms": None,
             "llm_response": None,
             "llm_quality_rating": None,         # 1-4 manual rating
@@ -89,6 +91,7 @@ class MetricsLogger:
         """Log STT result and timing."""
         self._current_turn["stt_latency_ms"] = round(latency_ms, 1)
         self._current_turn["stt_text"] = text
+        self._current_turn["stt_done_time"] = time.perf_counter()
 
     # ── Groq / LLM timing ──────────────────────────────────────
 
@@ -105,9 +108,17 @@ class MetricsLogger:
     # ── TTS timing ──────────────────────────────────────────────
 
     def log_tts_generation(self, gen_ms):
-        """Log Edge-TTS audio generation time (cumulative for all chunks)."""
+        """Log Deepgram TTS audio generation time (cumulative for all chunks)."""
         prev = self._current_turn.get("tts_generation_ms") or 0
         self._current_turn["tts_generation_ms"] = round(prev + gen_ms, 1)
+
+    def log_tts_first_audio(self):
+        """Log the moment TTS first audio byte is piped to the player.
+        Calculates user_to_speech_ms = now - stt_done_time."""
+        stt_done = self._current_turn.get("stt_done_time")
+        if stt_done is not None:
+            gap_ms = (time.perf_counter() - stt_done) * 1000
+            self._current_turn["user_to_speech_ms"] = round(gap_ms, 1)
 
     def log_tts_playback(self, play_ms):
         """Log mpg123 playback time (cumulative for all chunks)."""
@@ -148,6 +159,7 @@ class MetricsLogger:
         groq_full = [t["groq_full_latency_ms"] for t in self.turns if t.get("groq_full_latency_ms") is not None]
         tts_gen = [t["tts_generation_ms"] for t in self.turns if t.get("tts_generation_ms") is not None]
         tts_total = [t["tts_total_ms"] for t in self.turns if t.get("tts_total_ms") is not None]
+        user_to_speech = [t["user_to_speech_ms"] for t in self.turns if t.get("user_to_speech_ms") is not None]
         turnarounds = [t["total_turnaround_ms"] for t in self.turns if t.get("total_turnaround_ms") is not None]
         qualities = [t["llm_quality_rating"] for t in self.turns if t.get("llm_quality_rating") is not None]
 
@@ -175,6 +187,7 @@ class MetricsLogger:
             "groq_full_response_ms": _stats(groq_full),
             "tts_generation_ms": _stats(tts_gen),
             "tts_total_ms": _stats(tts_total),
+            "user_to_speech_ms": _stats(user_to_speech),
             "total_turnaround_ms": _stats(turnarounds),
             "llm_quality_rating": _stats(qualities),
             "memory_facts_shared": len(self.facts_shared),
@@ -223,6 +236,7 @@ class MetricsLogger:
             ("Groq Full Response", "groq_full_response_ms"),
             ("TTS Generation", "tts_generation_ms"),
             ("TTS Total", "tts_total_ms"),
+            ("User→Speech Gap", "user_to_speech_ms"),
             ("Total Turnaround", "total_turnaround_ms"),
         ]:
             st = s[key]

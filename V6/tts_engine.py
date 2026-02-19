@@ -3,10 +3,10 @@ Text-to-Speech Engine for Driver Drowsiness Detection System V6
 Uses Deepgram Aura TTS REST API — streams audio bytes directly
 to mpg123 via stdin pipe — zero file I/O on the SD card.
 
-Two-stage pipeline:
-  1. Generator thread: streams audio bytes from Deepgram TTS into memory
-  2. Playback thread: pipes bytes to mpg123 process via stdin
-  Chunk N+1 generates while chunk N plays = minimal gaps.
+Single-thread pipeline:
+  Worker receives text → HTTP-streams Deepgram audio → pipes each chunk
+  directly into mpg123's stdin as it arrives.  Playback starts after the
+  FIRST chunk (~100-200ms) instead of waiting for the full download.
 """
 
 import queue
@@ -19,18 +19,15 @@ from config import Config
 
 
 class TTSEngine:
-    """Deepgram TTS with pipelined generation + playback (RPi optimized)."""
+    """Deepgram TTS with direct-pipe streaming (lowest latency)."""
 
     def __init__(self):
-        self.audio_queue = queue.Queue()       # text chunks in
-        self._playback_queue = queue.Queue()   # (audio_bytes, gen_ms) ready to play
+        self.audio_queue = queue.Queue()       # text in
         self._done_event = threading.Event()
         self._done_event.set()  # start as "done" (nothing pending)
 
-        self._gen_thread = threading.Thread(target=self._generator_worker, daemon=True)
-        self._play_thread = threading.Thread(target=self._playback_worker, daemon=True)
-        self._gen_thread.start()
-        self._play_thread.start()
+        self._worker_thread = threading.Thread(target=self._worker, daemon=True)
+        self._worker_thread.start()
 
         self.is_speaking = False
         self._pending_chunks = 0
@@ -38,99 +35,74 @@ class TTSEngine:
         self.metrics_logger = None
         self._turn_tts_start = None
 
-    def _generator_worker(self):
-        """Stage 1: Stream audio bytes from Deepgram TTS into memory.
+    def _worker(self):
+        """Single worker: Deepgram HTTP stream → mpg123 stdin in real-time.
 
-        NOTE: Generation and playback are pipelined at the SENTENCE level —
-        sentence N+1 generates while sentence N plays. Within a single
-        sentence, we stream audio chunks directly to the player
-        (see _playback_worker) for lowest first-byte latency.
+        For each text chunk:
+          1. POST to Deepgram TTS with stream=True
+          2. Start mpg123
+          3. Pipe each HTTP chunk directly to mpg123's stdin
+        Audio begins playing after the first ~1KB arrives (~100-200ms).
+        No intermediate buffering.
         """
         while True:
             text = self.audio_queue.get()
             if text is None:
-                self._playback_queue.put(None)
                 break
 
-            try:
-                t_gen_start = time.perf_counter()
-                audio_chunks = self._generate_chunks(text)
-                gen_ms = (time.perf_counter() - t_gen_start) * 1000
-
-                if audio_chunks:
-                    self._playback_queue.put((audio_chunks, gen_ms))
-                else:
-                    with self._pending_lock:
-                        self._pending_chunks -= 1
-                        if self._pending_chunks <= 0:
-                            self._pending_chunks = 0
-                            self._done_event.set()
-
-            except Exception as e:
-                print(f"⚠️ TTS generation error: {e}")
-                with self._pending_lock:
-                    self._pending_chunks -= 1
-                    if self._pending_chunks <= 0:
-                        self._pending_chunks = 0
-                        self._done_event.set()
-
-            self.audio_queue.task_done()
-
-    def _playback_worker(self):
-        """Stage 2: Stream audio chunks to mpg123 as they arrive (low latency).
-
-        Instead of buffering the entire sentence's audio and then playing,
-        we write each chunk to mpg123's stdin as it arrives from
-        the generator. This means playback starts after the FIRST chunk
-        (~50-150ms) rather than waiting for the entire sentence (~300-800ms).
-        """
-        while True:
-            item = self._playback_queue.get()
-            if item is None:
-                break
-
-            audio_chunks, gen_ms = item
             self.is_speaking = True
+            t_start = time.perf_counter()
 
             try:
-                t_play_start = time.perf_counter()
-
-                # Start mpg123 and stream chunks to its stdin
-                proc = subprocess.Popen(
-                    ["mpg123", "-q", "-"],
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
+                url = (
+                    f"https://api.deepgram.com/v1/speak"
+                    f"?model={Config.DEEPGRAM_TTS_VOICE}"
+                    f"&encoding=mp3"
+                    f"&speed={Config.DEEPGRAM_TTS_SPEED}"
                 )
-                for chunk in audio_chunks:
-                    proc.stdin.write(chunk)
+
+                headers = {
+                    "Authorization": f"Token {Config.DEEPGRAM_API_KEY}",
+                    "Content-Type": "application/json",
+                }
+
+                payload = {"text": text}
+
+                # Stream=True: iter_content yields chunks as they arrive
+                resp = requests.post(
+                    url, headers=headers, json=payload,
+                    stream=True, timeout=15,
+                )
+                resp.raise_for_status()
+
+                # Start player BEFORE we have all audio — pipe as we receive
+                proc = self._start_player()
+                if proc is None:
+                    resp.close()
+                    continue
+
+                gen_ms = (time.perf_counter() - t_start) * 1000  # time-to-first-byte approx
+                first_byte_logged = False
+
+                for chunk in resp.iter_content(chunk_size=1024):
+                    if chunk:
+                        proc.stdin.write(chunk)
+                        if not first_byte_logged:
+                            first_byte_logged = True
+                            if self.metrics_logger:
+                                self.metrics_logger.log_tts_first_audio()
+
                 proc.stdin.close()
                 proc.wait()
 
-                play_ms = (time.perf_counter() - t_play_start) * 1000
+                total_ms = (time.perf_counter() - t_start) * 1000
 
                 if self.metrics_logger:
                     self.metrics_logger.log_tts_generation(gen_ms)
-                    self.metrics_logger.log_tts_playback(play_ms)
-
-            except FileNotFoundError:
-                # mpg123 not installed — try ffplay as fallback
-                try:
-                    proc = subprocess.Popen(
-                        ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", "-"],
-                        stdin=subprocess.PIPE,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL
-                    )
-                    for chunk in audio_chunks:
-                        proc.stdin.write(chunk)
-                    proc.stdin.close()
-                    proc.wait()
-                except Exception as e2:
-                    print(f"⚠️ No audio player found (mpg123/ffplay): {e2}")
+                    self.metrics_logger.log_tts_playback(total_ms - gen_ms)
 
             except Exception as e:
-                print(f"⚠️ TTS playback error: {e}")
+                print(f"⚠️ TTS error: {e}")
 
             finally:
                 with self._pending_lock:
@@ -140,38 +112,26 @@ class TTSEngine:
                         self.is_speaking = False
                         self._done_event.set()
 
-            self._playback_queue.task_done()
+                self.audio_queue.task_done()
 
-    def _generate_chunks(self, text):
-        """Stream audio chunks from Deepgram TTS REST API.
-
-        Returns a list of bytes objects for incremental playback.
-        The playback worker writes each chunk to mpg123's stdin sequentially,
-        so mpg123 can start decoding/playing as soon as it has enough data.
-        """
-        url = (
-            f"https://api.deepgram.com/v1/speak"
-            f"?model={Config.DEEPGRAM_TTS_VOICE}"
-            f"&encoding=mp3"
-            f"&speed={Config.DEEPGRAM_TTS_SPEED}"
-        )
-
-        headers = {
-            "Authorization": f"Token {Config.DEEPGRAM_API_KEY}",
-            "Content-Type": "application/json",
-        }
-
-        payload = {"text": text}
-
-        resp = requests.post(url, headers=headers, json=payload, stream=True, timeout=15)
-        resp.raise_for_status()
-
-        chunks = []
-        for chunk in resp.iter_content(chunk_size=1024):
-            if chunk:
-                chunks.append(chunk)
-
-        return chunks if chunks else None
+    @staticmethod
+    def _start_player():
+        """Start mpg123 (or ffplay fallback) and return the Popen handle."""
+        for cmd in [
+            ["mpg123", "-q", "-"],
+            ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", "-"],
+        ]:
+            try:
+                return subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except FileNotFoundError:
+                continue
+        print("⚠️ No audio player found (mpg123/ffplay)")
+        return None
 
     def speak(self, text):
         """Queue text for speech."""
