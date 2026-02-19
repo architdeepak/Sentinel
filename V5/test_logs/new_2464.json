@@ -1,0 +1,143 @@
+{
+  "trial_id": "new_2464",
+  "driver_type": "new",
+  "timestamp": "2026-02-18T14:10:22.212337",
+  "turns": [
+    {
+      "turn": 0,
+      "turn_start": 10587.112084938,
+      "stt_latency_ms": null,
+      "stt_text": null,
+      "groq_latency_ms": 582.8,
+      "groq_full_latency_ms": 946.5,
+      "groq_tokens": 72,
+      "tts_generation_ms": 5173.4,
+      "tts_playback_ms": 18873.0,
+      "tts_total_ms": 19703.4,
+      "total_turnaround_ms": 22668.2,
+      "llm_response": "I can see that. Let's get you alert right away. First, roll down your window for some fresh air. Now, take a deep breath in through your nose, hold it for 4 seconds, and blow it out hard through your mouth. As you're doing that, tell me, what's your name and where are you headed today?",
+      "llm_quality_rating": 4,
+      "memory_facts_extracted_this_turn": 0
+    },
+    {
+      "turn": 1,
+      "turn_start": 10609.780503287,
+      "stt_latency_ms": 9956.2,
+      "stt_text": "my name is archit and I'm headed towards the job my job",
+      "groq_latency_ms": 442.4,
+      "groq_full_latency_ms": 1001.1,
+      "groq_tokens": 92,
+      "tts_generation_ms": 6258.9,
+      "tts_playback_ms": 25279.5,
+      "tts_total_ms": 26314.0,
+      "total_turnaround_ms": 39347.5,
+      "llm_response": "Archit, I can hear you're really struggling to stay awake. Let's get those eyes wide open! Sit up straight, push your shoulders back, and grip the steering wheel tightly for 5 seconds. Now, release and take another deep breath. I need you to stay with me here. What's the first thing you're going to do when you get to your job, Archit? Try to speak a bit louder for me, okay?",
+      "llm_quality_rating": 4,
+      "memory_facts_extracted_this_turn": 0
+    },
+    {
+      "turn": 2,
+      "turn_start": 10649.428387527,
+      "stt_latency_ms": 10099.9,
+      "stt_text": "okay the first thing I'm going to do is I'm going to get a cup of coffee",
+      "groq_latency_ms": 381.2,
+      "groq_full_latency_ms": 821.2,
+      "groq_tokens": 90,
+      "tts_generation_ms": 6088.5,
+      "tts_playback_ms": 22949.2,
+      "tts_total_ms": 23904.6,
+      "total_turnaround_ms": 36712.3,
+      "llm_response": "Coffee sounds like just what you need, Archit! Let's get you even more alert. Turn up the volume on your radio to something upbeat, and I want you to sing along to the lyrics for the next 30 seconds. Don't worry about how you sound, just sing! And as you're singing, I want you to tap your hands on the steering wheel to the beat. Can you do that for me, Archit?",
+      "llm_quality_rating": 4,
+      "memory_facts_extracted_this_turn": 0
+    },
+    {
+      "turn": 3,
+      "turn_start": 10686.441021088,
+      "stt_latency_ms": 8009.6,
+      "stt_text": "that's awesome I'm feeling much more awake now thank you",
+      "groq_latency_ms": 379.2,
+      "groq_full_latency_ms": 822.9,
+      "groq_tokens": 81,
+      "tts_generation_ms": 6342.0,
+      "tts_playback_ms": 22290.6,
+      "tts_total_ms": 23140.4,
+      "total_turnaround_ms": 35025.0,
+      "llm_response": "That's great to hear, Archit! I'm glad the music and singing helped. Now, let's keep the momentum going. I want you to do a quick math problem: what's 24 divided by 4? Say the answer out loud, and as you do, roll your shoulders and stretch your neck to loosen up. You're doing fantastic, Archit, keep it up!",
+      "llm_quality_rating": 4,
+      "memory_facts_extracted_this_turn": 0
+    },
+    {
+      "turn": 4,
+      "turn_start": 10721.766359152,
+      "stt_latency_ms": 10513.4,
+      "stt_text": "exit",
+      "groq_latency_ms": null,
+      "groq_full_latency_ms": null,
+      "groq_tokens": 0,
+      "tts_generation_ms": null,
+      "tts_playback_ms": null,
+      "tts_total_ms": null,
+      "total_turnaround_ms": 10513.9,
+      "llm_response": null,
+      "llm_quality_rating": null,
+      "memory_facts_extracted_this_turn": 0
+    }
+  ],
+  "facts_shared": [
+    "name",
+    "occupation or what they do"
+  ],
+  "facts_extracted": [],
+  "summary": {
+    "trial_id": "new_2464",
+    "driver_type": "new",
+    "total_turns": 5,
+    "total_conversation_ms": 145168.5,
+    "stt_latency_ms": {
+      "min": 8009.6,
+      "max": 10513.4,
+      "avg": 9644.8,
+      "count": 4
+    },
+    "groq_first_token_ms": {
+      "min": 379.2,
+      "max": 582.8,
+      "avg": 446.4,
+      "count": 4
+    },
+    "groq_full_response_ms": {
+      "min": 821.2,
+      "max": 1001.1,
+      "avg": 897.9,
+      "count": 4
+    },
+    "tts_generation_ms": {
+      "min": 5173.4,
+      "max": 6342.0,
+      "avg": 5965.7,
+      "count": 4
+    },
+    "tts_total_ms": {
+      "min": 19703.4,
+      "max": 26314.0,
+      "avg": 23265.6,
+      "count": 4
+    },
+    "total_turnaround_ms": {
+      "min": 10513.9,
+      "max": 39347.5,
+      "avg": 28853.4,
+      "count": 5
+    },
+    "llm_quality_rating": {
+      "min": 4,
+      "max": 4,
+      "avg": 4.0,
+      "count": 4
+    },
+    "memory_facts_shared": 2,
+    "memory_facts_extracted": 0,
+    "memory_extraction_accuracy": 0.0
+  }
+}
