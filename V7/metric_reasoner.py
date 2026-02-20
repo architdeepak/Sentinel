@@ -106,22 +106,27 @@ During conversation, you may also receive voice metrics. These are powerful drow
 
 ### Energy RMS (0.0–1.0)
 Speech volume/energy. Each person has a different baseline — compare to their personal baseline when available.
-- Significant drop from baseline (e.g. 50%+ below normal) = getting quieter, likely drowsier
+Natural variation of +/- 30% from baseline is NORMAL for most people — everyone's voice fluctuates.
+- 45%+ drop from baseline = getting notably quieter, likely drowsier
+- 20-45% below baseline = possible early sign, but could be normal variation. Only flag if OTHER signals confirm.
 - Stable near baseline = normal
 
 ### Speech Rate (words per minute)
 How fast the driver speaks. Drowsy people slow down.
-- 25%+ drop from baseline = notably slower, likely drowsy
+- 40%+ drop from baseline = notably slower, likely drowsy
+- 20-40% below baseline = some slowing, could be thinking or relaxed speech. Need corroboration.
 - Stable near baseline = normal
 
 ### Pause Ratio (0.0–1.0)
 Fraction of speech that is silence. Drowsy people pause more.
-- 50%+ above baseline = significantly more hesitation
+- 75%+ above baseline = significantly more hesitation
+- 30-75% above baseline = some increase, could be normal thinking pauses. Only concerning with other signals.
 - Stable near baseline = normal
 
 ### Response Latency (seconds)
 How long after being asked a question the driver starts speaking.
-- 3+ seconds longer than baseline = notably slower processing
+- 5+ seconds longer than baseline = notably slower processing
+- 2-5 seconds longer = some delay, but people naturally vary. Check other metrics.
 - Stable near baseline = normal
 
 ## Voice + Visual Combined Reasoning

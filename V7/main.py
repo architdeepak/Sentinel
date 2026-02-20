@@ -348,12 +348,13 @@ def run_llm_conversation(tts, stt, llm_assistant, metrics, state,
             # Feed voice features into the 8B reasoner for combined reasoning
             if (latest_voice_features and reasoner is not None
                     and reasoner.should_call()):
-                reasoner.evaluate(
+                r_result = reasoner.evaluate(
                     det_state,
                     microsleep=det_state.get('microsleep', False),
                     head_down=det_state.get('head_down', False),
                     voice_features=latest_voice_features,
                 )
+                dashboard.update_reasoner(r_result)
 
             response = llm_assistant.get_response_streaming(
                 user_message=text,

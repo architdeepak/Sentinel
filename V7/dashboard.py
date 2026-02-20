@@ -18,7 +18,7 @@ import numpy as np
 
 
 # ── Layout constants ──
-_W, _H = 480, 420
+_W, _H = 480, 520
 _BG = (20, 20, 20)
 _FONT = cv2.FONT_HERSHEY_SIMPLEX
 _WHITE = (220, 220, 220)
@@ -72,6 +72,12 @@ class DashboardRenderer:
         self._voice = {}
         self._prev_voice = {}
 
+        # 8B Reasoner state (updated from conversation thread)
+        self._reasoner_lock = threading.Lock()
+        self._reasoner_level = "ALERT"
+        self._reasoner_conf = 0.0
+        self._reasoner_reasoning = ""
+
         # Previous detection for trend
         self._prev_det = {}
 
@@ -84,6 +90,17 @@ class DashboardRenderer:
             self._prev_voice = self._voice.copy()
             self._voice = features.copy() if features else {}
             self._turn += 1
+
+    def update_reasoner(self, result):
+        """Thread-safe: called after 8B reasoner evaluates.
+
+        Args:
+            result: ReasonerResult with .level, .confidence, .reasoning
+        """
+        with self._reasoner_lock:
+            self._reasoner_level = result.level
+            self._reasoner_conf = result.confidence
+            self._reasoner_reasoning = result.reasoning
 
     def render(self, det):
         """Render dashboard image from detection metrics dict.
@@ -224,6 +241,44 @@ class DashboardRenderer:
             cv2.putText(img, "Waiting for first voice sample...", (10, y),
                         _FONT, 0.4, _GRAY, 1)
             y += 20
+
+        # ── Divider ──
+        cv2.line(img, (10, y + 4), (_W - 10, y + 4), _GRAY, 1)
+        y += 22
+
+        # ── 8B Reasoner ──
+        with self._reasoner_lock:
+            r_level = self._reasoner_level
+            r_conf = self._reasoner_conf
+            r_reasoning = self._reasoner_reasoning
+
+        level_colors = {
+            "ALERT": _GREEN, "MILD": _YELLOW,
+            "DROWSY": _RED, "CRITICAL": _RED,
+        }
+        lc = level_colors.get(r_level, _WHITE)
+
+        cv2.putText(img, "8B REASONER", (10, y), _FONT, 0.5, _CYAN, 1)
+        cv2.putText(img, f"{r_level} ({r_conf:.0%})", (160, y),
+                    _FONT, 0.5, lc, 1)
+        y += 22
+
+        # Word-wrap reasoning text into ~55-char lines
+        if r_reasoning:
+            words = r_reasoning.split()
+            line = ""
+            for w in words:
+                if len(line) + len(w) + 1 > 58:
+                    cv2.putText(img, line.strip(), (10, y),
+                                _FONT, 0.35, _GRAY, 1)
+                    y += 16
+                    line = w + " "
+                else:
+                    line += w + " "
+            if line.strip():
+                cv2.putText(img, line.strip(), (10, y),
+                            _FONT, 0.35, _GRAY, 1)
+                y += 16
 
         # ── Footer ──
         cv2.putText(img, "Live metrics | Updates every frame + per voice turn",

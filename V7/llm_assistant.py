@@ -117,11 +117,13 @@ Each turn you'll receive raw sensor data. Here's what each metric means and how 
 - **peak_amp**: Maximum amplitude. Very low peak with low RMS confirms quiet speech, not just a quiet passage.
 
 ### Using Personal Baselines
-When baseline data is available, you'll see comparisons like "67% of normal" or "+0.20 vs baseline". USE THESE for reasoning:
-- A 30%+ drop in energy_rms from baseline = significantly quieter than THEIR normal
-- A 25%+ drop in speech_rate from baseline = notably slower than THEIR normal
-- A 50%+ increase in pause_ratio above baseline = significantly more pauses than THEIR normal
-- 3+ seconds more response_latency than baseline = notably slower to respond than THEIR normal
+When baseline data is available, you'll see comparisons like "67% of normal" or "+0.20 vs baseline". USE THESE for reasoning — but be LENIENT. Natural voice variation is large:
+- A 45%+ drop in energy_rms from baseline = significantly quieter than THEIR normal
+- A 40%+ drop in speech_rate from baseline = notably slower than THEIR normal
+- A 75%+ increase in pause_ratio above baseline = significantly more pauses than THEIR normal
+- 5+ seconds more response_latency than baseline = notably slower to respond than THEIR normal
+
+**Smaller deviations (10-30%) are NORMAL variation** — people speak differently depending on what they're saying, their mood, the topic, etc. Do NOT flag small voice deviations as drowsiness unless MULTIPLE visual signals also confirm it.
 
 **ALWAYS prefer deviation from baseline over absolute numbers.** What's "quiet" for one person is "normal" for another.
 
