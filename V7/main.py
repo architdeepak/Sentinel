@@ -246,8 +246,8 @@ def run_llm_conversation(tts, stt, llm_assistant, metrics, state,
     score_accumulator = []
     voice_accumulator = []
 
-    # Detection thread (own camera + FaceMesh)
-    detection_thread = DetectionThread()
+    # Detection thread (own camera + FaceMesh) — with live camera overlay
+    detection_thread = DetectionThread(show_display=True)
     detection_thread.start()
 
     # Get baselines for voice comparison
@@ -265,8 +265,9 @@ def run_llm_conversation(tts, stt, llm_assistant, metrics, state,
         head_down=metrics.get('head_down', False),
     )
 
-    # Start conversation with raw metrics + baselines
-    llm_assistant.start_conversation(detection_context, baselines_str)
+    # Start conversation with raw metrics + baselines + session history
+    session_count = memory_manager.get_session_count() - 1  # -1 because we just started this one
+    llm_assistant.start_conversation(detection_context, baselines_str, max(0, session_count))
 
     # Get opening message
     opening = llm_assistant.get_response_streaming()
@@ -277,7 +278,8 @@ def run_llm_conversation(tts, stt, llm_assistant, metrics, state,
     max_turns = Config.MAX_CONVERSATION_TURNS
 
     def _handle_user_turn(text, audio):
-        """Extract raw features, get live detection, inject both to LLM."""
+        """Extract raw features, get live detection, inject both to LLM.
+        Returns the LLM response text."""
         # Voice features (raw)
         voice_context = None
         if audio is not None:
@@ -297,28 +299,34 @@ def run_llm_conversation(tts, stt, llm_assistant, metrics, state,
         score_accumulator.append(det_state.get('drowsy_score', 0))
 
         # LLM gets raw numbers for both
-        llm_assistant.get_response_streaming(
+        response = llm_assistant.get_response_streaming(
             user_message=text,
             detection_context=det_context,
             voice_context=voice_context,
         )
         tts.wait_until_done()
         voice_extractor.mark_prompt_end()
+        return response
 
-    exit_words = {'exit', 'quit', 'bye', 'stop', 'goodbye', 'done',
-                  'enough', 'fine', 'alert', "i'm good", "im good"}
+    # Only explicit exit phrases — NOT common words like "fine" or "alert"
+    hard_exit = {'exit', 'quit', 'bye', 'goodbye', 'bye bye', 'stop talking'}
 
     for turn in range(max_turns):
         user_input, audio_data = stt.listen(timeout=20, show_diagnostics=False)
 
         if user_input:
-            if any(word in user_input.lower() for word in exit_words):
-                print("🔚 User indicated they're alert")
-                tts.speak("Great! You sound much better. I'll keep monitoring quietly.")
+            if user_input.lower().strip() in hard_exit:
+                print("🔚 User requested exit")
+                tts.speak("Alright, I'll be here if you need me. Stay safe!")
                 tts.wait_until_done()
                 break
 
-            _handle_user_turn(user_input, audio_data)
+            response = _handle_user_turn(user_input, audio_data)
+
+            # LLM decides when driver has recovered (via [RECOVERED] tag)
+            if response and "[RECOVERED]" in response:
+                print("🟢 LLM determined driver has recovered")
+                break
         else:
             print("⚠️  No response detected")
             tts.speak("Are you still there? Give me a quick response if you can hear me.")
@@ -331,7 +339,10 @@ def run_llm_conversation(tts, stt, llm_assistant, metrics, state,
                 tts.speak("I'll keep monitoring. Stay safe!")
                 tts.wait_until_done()
                 break
-            _handle_user_turn(retry_input, retry_audio)
+            response = _handle_user_turn(retry_input, retry_audio)
+            if response and "[RECOVERED]" in response:
+                print("🟢 LLM determined driver has recovered")
+                break
 
     # Stop background detection + dashboard
     detection_thread.stop()
@@ -443,16 +454,29 @@ def main():
                 voice_extractor, memory_manager,
             )
 
-            # Reopen camera for monitoring
-            try:
-                cap = initialize_camera()
-                face_mesh = initialize_mediapipe()
-                state['llm_triggered'] = False
-                state['drowsy_count'] = 0
-                time.sleep(0.5)
-                print("\n✓ Monitoring resumed\n")
-            except Exception as e:
-                print(f"⚠️ Failed to restart camera: {e}")
+            # Reopen camera for monitoring (retry — device may take time to release)
+            cv2.destroyAllWindows()
+            time.sleep(1.0)
+            reopen_ok = False
+            for attempt in range(5):
+                try:
+                    cap = initialize_camera()
+                    if cap.isOpened():
+                        face_mesh = initialize_mediapipe()
+                        state['llm_triggered'] = False
+                        state['drowsy_count'] = 0
+                        reopen_ok = True
+                        print("\n✓ Monitoring resumed\n")
+                        break
+                    else:
+                        cap.release()
+                except Exception:
+                    pass
+                print(f"⚠️ Camera not ready, retrying ({attempt + 1}/5)...")
+                time.sleep(1.0)
+
+            if not reopen_ok:
+                print("⚠️ Failed to restart camera after 5 attempts")
                 break
 
     except KeyboardInterrupt:

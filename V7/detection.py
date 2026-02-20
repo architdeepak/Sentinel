@@ -257,7 +257,8 @@ class DetectionThread:
     secondary while speech/LLM are active).
     """
 
-    def __init__(self):
+    def __init__(self, show_display=False):
+        self._show_display = show_display
         # Shared metrics (protected by lock)
         self._lock = threading.Lock()
         self._latest_metrics = {
@@ -379,13 +380,16 @@ class DetectionThread:
                 microsleep = False
                 head_down = False
                 head_roll = False
+                ear = 0
+                mar = 0
+                landmarks = None
 
                 if results.multi_face_landmarks:
                     lm = results.multi_face_landmarks[0].landmark
                     landmarks = [(int(p.x * PROC_W), int(p.y * PROC_H)) for p in lm]
 
-                    _, microsleep = process_eye_metrics(landmarks, state, now)
-                    process_mouth_metrics(landmarks, state, now)
+                    ear, microsleep = process_eye_metrics(landmarks, state, now)
+                    mar = process_mouth_metrics(landmarks, state, now)
                     head_down = process_head_pitch(landmarks, state, now)
                     head_roll = process_head_roll(landmarks, state, now)
 
@@ -398,6 +402,15 @@ class DetectionThread:
                     self._microsleep = microsleep
                     self._head_down = head_down
 
+                # Show camera overlay if display mode is on
+                if self._show_display:
+                    drowsy_state = "DROWSY" if metrics['drowsy_score'] > Config.DROWSY_THRESHOLD else "ALERT"
+                    draw_overlay(frame, metrics, ear, mar, microsleep, head_down,
+                                 head_roll, state, drowsy_state, landmarks=landmarks,
+                                 proc_size=(PROC_W, PROC_H))
+                    cv2.imshow("Driver Drowsiness Monitor", frame)
+                    cv2.waitKey(1)
+
                 # Throttle to target FPS
                 time.sleep(1.0 / Config.DETECTION_THREAD_FPS)
 
@@ -405,6 +418,11 @@ class DetectionThread:
             # Always release thread-local resources
             cap.release()
             face_mesh.close()
+            if self._show_display:
+                try:
+                    cv2.destroyWindow("Driver Drowsiness Monitor")
+                except Exception:
+                    pass
 
 
 # =========================

@@ -40,19 +40,39 @@ class LLMAssistant:
             print(f"⚠️ Groq initialization failed: {e}")
             self.client = None
 
-    def start_conversation(self, detection_context, voice_baselines_str):
+    def start_conversation(self, detection_context, voice_baselines_str, session_count=0):
         """Start a new conversation with raw detection context and driver profile.
 
         Args:
             detection_context: string from format_detection_for_llm() — raw metrics
             voice_baselines_str: string from memory_manager.format_baselines_for_llm()
+            session_count: number of prior sessions (0 = first activation ever)
         """
         self.conversation_turns = 0
 
         # Get driver profile from SQLite facts
         profile_summary = self.memory_manager.get_profile_summary()
 
+        # Build session context for varied, personalized openings
+        if session_count == 0:
+            session_context = ("FIRST ACTIVATION EVER for this driver. "
+                             "Introduce yourself briefly: 'Hey, I'm Sentinel, your drowsy driving companion.' "
+                             "Ask for their name. Learn about them naturally throughout the conversation.")
+        elif session_count <= 3:
+            session_context = (f"This is activation #{session_count + 1} for this driver. "
+                             "Do NOT re-introduce yourself — they already know you. "
+                             "Use their name if known. Reference their profile. "
+                             "Build on what you learned in previous conversations.")
+        else:
+            session_context = (f"This is activation #{session_count + 1} — returning driver with "
+                             f"{session_count} prior sessions. You know this person. "
+                             "Be familiar and warm. Use their name. Reference shared knowledge. "
+                             "You're a trusted companion at this point.")
+
         system_prompt = f"""You are Sentinel, an AI safety companion in a car. Your ONLY job is to help drowsy drivers regain alertness through engaging conversation. You were just activated because the driver crossed the drowsiness threshold.
+
+## Session Context
+{session_context}
 
 ## Driver Profile
 {profile_summary}
@@ -146,11 +166,21 @@ You are an anti-drowsiness assistant. Actively combat the driver's drowsiness us
 ## Conversation Strategy
 
 ### Opening
+CRITICAL: Your opening MUST be unique every time. NEVER start two conversations the same way.
 Match urgency to the raw detection metrics. NEVER say "I can see" — you detect through sensors.
+
+**First activation (new driver):** "Hey, I'm Sentinel, your drowsy driving companion." + immediate physical prompt + ask their name.
+**Returning driver:** Skip introduction entirely. Use their name. Open with something personal, then weave in the alertness technique.
 
 **Score 0.47-0.60:** Moderate. Warm engagement + physical prompt.
 **Score 0.60-0.75:** High. More urgent physical actions + direct check-in.
-**Score >0.75 or microsleep=True:** Critical. Push to pull over.
+**Score >0.75 or microsleep=True:** Critical. Strongly push to pull over.
+
+Vary your approach — rotate between these styles:
+- Physical action lead: "Quick — squeeze the steering wheel tight for 5 seconds, then release!"
+- Personal question lead: "Hey [name], what's something exciting you have planned this week?"
+- Challenge lead: "Let's wake up that brain — name 5 things you can see on the road right now."
+- Context lead: "Late drive again? Tell me where you're heading."
 
 ### Flow
 1. **Turn 1-2:** Physical activation + establish rapport + learn preferences if new driver
@@ -163,18 +193,51 @@ Match urgency to the raw detection metrics. NEVER say "I can see" — you detect
 - If response_latency increasing → they're processing slower → escalate
 - If detection score improving and voice metrics stable → they're recovering → encourage
 
+### Ending the Conversation
+When you determine the driver has GENUINELY recovered, include [RECOVERED] at the very END of your final response (after your goodbye message).
+
+Signs of real recovery (need MULTIPLE of these):
+- Detection score dropping below 0.35 over several turns
+- Voice energy and speech rate returning near baseline
+- Response latency decreasing
+- Coherent, energetic, alert-sounding responses
+- Multiple turns of sustained improvement
+
+Do NOT include [RECOVERED] just because the driver SAYS they're fine — drowsy people routinely claim they're OK when they're not. Require the METRICS to confirm recovery over several turns.
+
+When ending, be warm and personal: "Alright [name], you're sounding much sharper! I'll keep watching from here — eyes on the road!"
+
 ## What NOT to Do
 - Don't pre-interpret metrics — you already have the raw numbers, reason from them
 - Don't mention technical metric names to the driver
 - Don't lecture about drowsy driving dangers
 - Don't repeat the same technique twice in a row
 - Don't ask yes/no questions
-- Don't ignore the Driver Profile when it has useful info"""
+- Don't ignore the Driver Profile when it has useful info
+- NEVER use the same opening phrase across conversations
+- Don't skip asking the driver's name if you don't know it yet
+- Don't end the conversation prematurely — drowsy drivers claim they're fine when they're not
+- Don't forget to actively learn about the driver (hobbies, family, work, preferences) and USE that info"""
 
         self._system_message = {"role": "system", "content": system_prompt}
+
+        # Dynamic initial message — avoids identical response every time
+        if session_count == 0:
+            initial_msg = (
+                f"[{detection_context}]\n"
+                "The system just activated for the first time. "
+                "I'm a new driver the system hasn't met before."
+            )
+        else:
+            initial_msg = (
+                f"[{detection_context}]\n"
+                f"Drowsiness detected again (activation #{session_count + 1}). "
+                "Start with something different from last time."
+            )
+
         self.messages = [
             self._system_message,
-            {"role": "user", "content": "I am feeling drowsy while driving"}
+            {"role": "user", "content": initial_msg}
         ]
 
     # ── History management ────────────────────────────────────────
@@ -257,9 +320,10 @@ Match urgency to the raw detection metrics. NEVER say "I can see" — you detect
                 print(token, end="", flush=True)
                 full_response += token
 
-            # Send full response as ONE TTS call
-            if full_response.strip():
-                self.tts.speak(full_response.strip())
+            # Send full response as ONE TTS call (strip control tags)
+            tts_text = full_response.strip().replace("[RECOVERED]", "").strip()
+            if tts_text:
+                self.tts.speak(tts_text)
 
             full_latency_ms = (time.perf_counter() - t_api_start) * 1000
             if self.metrics_logger:
