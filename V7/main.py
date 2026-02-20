@@ -245,6 +245,7 @@ def run_detection_loop(cap, face_mesh, state, reasoner):
 
         # Trigger conversation when 8B confirms drowsiness N consecutive times
         if (reasoner.is_confirmed_drowsy() and not state['llm_triggered']):
+            print("\n🚨 DROWSINESS DETECTED — triggering conversation")
             state['llm_triggered'] = True
             final_metrics = metrics.copy()
             final_metrics['microsleep'] = microsleep
@@ -505,20 +506,17 @@ def main():
     voice_extractor = VoiceFeatureExtractor()
     llm_assistant = LLMAssistant(tts, memory_manager)
 
-    # Voice calibration check — run if no baselines exist
-    if memory_manager.needs_calibration():
-        print("⚠️ No voice baselines found — running calibration...")
-        tts.speak("Welcome! I need to calibrate your voice first. "
-                  "Please read a few sentences in your normal speaking voice.")
-        tts.wait_until_done()
-        run_calibration(stt, voice_extractor, memory_manager)
-    else:
-        bls = memory_manager.get_baselines()
-        rms_bl = bls.get('energy_rms', {})
-        rate_bl = bls.get('speech_rate_wpm', {})
-        print(f"✓ Voice baselines loaded "
-              f"(RMS avg={rms_bl.get('avg', 0):.4f}, "
-              f"rate avg={rate_bl.get('avg', 0):.1f} wpm)")
+    # Voice calibration — always recalibrate on startup for fresh baselines
+    print("🎙️ Running voice baseline calibration...")
+    tts.speak("Quick voice calibration. Please read a few sentences in your normal voice.")
+    tts.wait_until_done()
+    run_calibration(stt, voice_extractor, memory_manager)
+    bls = memory_manager.get_baselines()
+    rms_bl = bls.get('energy_rms', {})
+    rate_bl = bls.get('speech_rate_wpm', {})
+    print(f"✓ Voice baselines updated "
+          f"(RMS avg={rms_bl.get('avg', 0):.4f}, "
+          f"rate avg={rate_bl.get('avg', 0):.1f} wpm)")
 
     # Initialize 8B MetricReasoner (replaces hardcoded drowsy_score gate)
     reasoner = MetricReasoner()
@@ -546,6 +544,10 @@ def main():
 
             if not should_trigger_llm:
                 break
+
+            # Announce drowsiness detection to the driver
+            tts.speak("Drowsiness detected. Starting conversation.")
+            tts.wait_until_done()
 
             # Release main camera before detection thread opens its own
             cap.release()

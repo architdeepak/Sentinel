@@ -176,14 +176,15 @@ def calculate_metrics(state, microsleep, head_down, head_roll):
     else:
         pitch_var = 0.0
 
+    # Score formula: eye-dominant — head metrics are unreliable/noisy
     drowsy_score = min(1.0, (
-        0.20 * perclos +
-        0.15 * int(microsleep) +
-        0.15 * min(slow_blinks / 5, 1.0) +
-        0.10 * min(ear_std / 0.12, 1.0) +
-        0.10 * min(pitch_var / 0.015, 1.0) +
-        0.20 * int(head_down) +
-        0.10 * int(head_roll)
+        0.30 * perclos +
+        0.20 * int(microsleep) +
+        0.20 * min(slow_blinks / 5, 1.0) +
+        0.15 * min(ear_std / 0.12, 1.0) +
+        0.05 * min(pitch_var / 0.015, 1.0) +
+        0.05 * int(head_down) +
+        0.05 * int(head_roll)
     ))
 
     return {
