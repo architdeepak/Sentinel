@@ -47,8 +47,7 @@ class Config:
     HEAD_ROLL_THRESH = 15
     ROLL_TIME = 1.2
     WINDOW_TIME = 10
-    DROWSY_THRESHOLD = 0.47
-    DROWSY_TRIGGER_COUNT = 10
+    DROWSY_THRESHOLD = 0.47  # Used only for DetectionThread overlay label
 
     # ── Conversation settings ──
     MAX_HISTORY_TURNS = 8
@@ -57,6 +56,13 @@ class Config:
     # ── Parallel detection during conversation ──
     DETECTION_THREAD_FPS = 10
     DETECTION_FRAME_SKIP = 3
+
+    # ── 8B MetricReasoner (replaces hardcoded drowsy_score formula) ──
+    GROQ_REASONER_MODEL = "llama-3.1-8b-instant"  # Same cheap model as extraction
+    REASONER_PRE_FILTER = 0.30       # Local score must exceed this before calling 8B
+    REASONER_INTERVAL_S = 3.0        # Min seconds between 8B API calls
+    REASONER_CONFIRM_COUNT = 3       # Consecutive DROWSY/CRITICAL before triggering
+    REASONER_HISTORY_SIZE = 10       # Rolling history snapshots for trend analysis
 
     # ── Calibration ──
     CALIBRATION_SENTENCES = 5  # Number of sentences for voice baseline calibration

@@ -68,6 +68,37 @@ class MemoryManager:
                     sample_count INTEGER DEFAULT 0,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS reasoner_evaluations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id INTEGER,
+                    timestamp TEXT NOT NULL,
+                    level TEXT NOT NULL,
+                    confidence REAL,
+                    reasoning TEXT,
+                    perclos REAL,
+                    blink_rate INTEGER,
+                    slow_blinks INTEGER,
+                    ear_std REAL,
+                    pitch_var REAL,
+                    microsleep INTEGER DEFAULT 0,
+                    head_down INTEGER DEFAULT 0,
+                    head_roll INTEGER DEFAULT 0,
+                    energy_rms REAL,
+                    speech_rate_wpm REAL,
+                    pause_ratio REAL,
+                    response_latency_s REAL
+                );
+
+                CREATE TABLE IF NOT EXISTS driver_patterns (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    pattern_type TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    confidence REAL DEFAULT 1.0,
+                    times_observed INTEGER DEFAULT 1,
+                    first_seen TEXT NOT NULL,
+                    last_seen TEXT NOT NULL
+                );
             """)
 
     def _connect(self):
@@ -328,6 +359,274 @@ class MemoryManager:
                 """, (fact_type, value, session_id, now, now))
 
     # ═══════════════════════════════════════════════════════════
+    #  Reasoner Evaluations & Driver Pattern Learning
+    # ═══════════════════════════════════════════════════════════
+
+    def store_reasoner_evaluations(self, session_id, evaluations):
+        """Store a batch of 8B reasoner evaluations from a session.
+
+        Args:
+            session_id: current session ID
+            evaluations: list of dicts with keys:
+                level, confidence, reasoning, perclos, blink_rate,
+                slow_blinks, ear_std, pitch_var, microsleep, head_down,
+                head_roll, energy_rms, speech_rate_wpm, pause_ratio,
+                response_latency_s, timestamp
+        """
+        if not evaluations:
+            return
+        with self._connect() as conn:
+            conn.executemany("""
+                INSERT INTO reasoner_evaluations
+                (session_id, timestamp, level, confidence, reasoning,
+                 perclos, blink_rate, slow_blinks, ear_std, pitch_var,
+                 microsleep, head_down, head_roll,
+                 energy_rms, speech_rate_wpm, pause_ratio, response_latency_s)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, [
+                (
+                    session_id,
+                    ev.get('timestamp', datetime.now().isoformat()),
+                    ev.get('level', 'ALERT'),
+                    ev.get('confidence', 0.5),
+                    ev.get('reasoning', ''),
+                    ev.get('perclos'),
+                    ev.get('blink_rate'),
+                    ev.get('slow_blinks'),
+                    ev.get('ear_std'),
+                    ev.get('pitch_var'),
+                    int(ev.get('microsleep', False)),
+                    int(ev.get('head_down', False)),
+                    int(ev.get('head_roll', False)),
+                    ev.get('energy_rms'),
+                    ev.get('speech_rate_wpm'),
+                    ev.get('pause_ratio'),
+                    ev.get('response_latency_s'),
+                )
+                for ev in evaluations
+            ])
+        print(f"✓ Stored {len(evaluations)} reasoner evaluations for session {session_id}")
+
+    def learn_driver_patterns(self, session_id):
+        """Use 8B model to analyze stored evaluations and learn driver-specific patterns.
+
+        Runs post-session: looks at all historical evaluations across sessions
+        to identify what metric combinations reliably indicate drowsiness for
+        THIS specific driver.
+        """
+        # Get all evaluations (recent first, cap at last 100)
+        with self._connect() as conn:
+            rows = conn.execute("""
+                SELECT level, confidence, reasoning,
+                       perclos, blink_rate, slow_blinks, ear_std, pitch_var,
+                       microsleep, head_down, head_roll,
+                       energy_rms, speech_rate_wpm, pause_ratio, response_latency_s
+                FROM reasoner_evaluations
+                ORDER BY id DESC LIMIT 100
+            """).fetchall()
+
+        if len(rows) < 5:
+            print("ℹ️ Not enough evaluations for pattern learning yet "
+                  f"({len(rows)}/5 needed)")
+            return
+
+        # Get existing patterns for dedup
+        existing_patterns = self._get_existing_patterns()
+
+        # Build summary for 8B analysis
+        drowsy_cases = []
+        alert_cases = []
+        for r in rows:
+            level = r[0]
+            entry = {
+                'level': level, 'confidence': r[1],
+                'perclos': r[3], 'blink_rate': r[4], 'slow_blinks': r[5],
+                'ear_std': r[6], 'pitch_var': r[7],
+                'microsleep': bool(r[8]), 'head_down': bool(r[9]),
+                'head_roll': bool(r[10]),
+                'energy_rms': r[11], 'speech_rate_wpm': r[12],
+                'pause_ratio': r[13], 'response_latency_s': r[14],
+            }
+            if level in ('DROWSY', 'CRITICAL'):
+                drowsy_cases.append(entry)
+            else:
+                alert_cases.append(entry)
+
+        prompt = self._build_pattern_learning_prompt(
+            drowsy_cases, alert_cases, existing_patterns
+        )
+
+        try:
+            client = self._get_groq_client()
+            response = client.chat.completions.create(
+                model=Config.GROQ_EXTRACTION_MODEL,
+                messages=[
+                    {"role": "system",
+                     "content": ("You are a pattern recognition expert analyzing "
+                                 "driver drowsiness data. Extract recurring patterns "
+                                 "specific to this driver. Return ONLY valid JSON.")},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.1,
+                max_tokens=600,
+            )
+
+            raw = response.choices[0].message.content.strip()
+            if raw.startswith("```"):
+                raw = raw[3:]
+                if raw.lower().startswith("json"):
+                    raw = raw[4:]
+                if raw.endswith("```"):
+                    raw = raw[:-3]
+            raw = raw.strip()
+
+            patterns = json.loads(raw)
+            if not isinstance(patterns, list):
+                patterns = [patterns]
+
+            count = 0
+            now = datetime.now().isoformat()
+            for p in patterns:
+                ptype = p.get('type', '').strip().lower().replace(' ', '_')
+                desc = p.get('description', '').strip()
+                if ptype and desc:
+                    self._store_pattern(ptype, desc, now)
+                    count += 1
+
+            print(f"✓ Pattern learning: stored/updated {count} driver patterns")
+
+        except Exception as e:
+            print(f"⚠️ Pattern learning failed: {e}")
+
+    def _build_pattern_learning_prompt(self, drowsy_cases, alert_cases,
+                                       existing_patterns):
+        """Build prompt for 8B to discover driver-specific patterns."""
+        def _metric_summary(cases, key, fmt=".3f"):
+            """Return 'min – max (avg X)' string for a metric, or None."""
+            vals = [c[key] for c in cases if c.get(key) is not None]
+            if not vals:
+                return None
+            avg = sum(vals) / len(vals)
+            return f"{min(vals):{fmt}} – {max(vals):{fmt}} (avg {avg:{fmt}})"
+
+        parts = []
+        parts.append("Analyze this driver's drowsiness detection history and identify "
+                     "PERSONAL patterns — things that are specific to THIS driver.")
+        parts.append("")
+
+        # Drowsy cases summary
+        parts.append(f"## DROWSY/CRITICAL Cases ({len(drowsy_cases)} evaluations)")
+        if drowsy_cases:
+            for key, label, fmt in [
+                ('perclos', 'PERCLOS range', '.3f'),
+                ('slow_blinks', 'Slow blinks range', '.1f'),
+                ('energy_rms', 'Voice energy (RMS) range', '.4f'),
+                ('speech_rate_wpm', 'Speech rate range', '.1f'),
+                ('pause_ratio', 'Pause ratio range', '.3f'),
+                ('response_latency_s', 'Response latency range', '.1f'),
+            ]:
+                s = _metric_summary(drowsy_cases, key, fmt)
+                if s:
+                    unit = ' wpm' if 'rate' in key else ('s' if 'latency' in key else '')
+                    parts.append(f"  {label}: {s}{unit}")
+            # Count head/microsleep events
+            ms_count = sum(1 for c in drowsy_cases if c['microsleep'])
+            hd_count = sum(1 for c in drowsy_cases if c['head_down'])
+            hr_count = sum(1 for c in drowsy_cases if c['head_roll'])
+            if ms_count or hd_count or hr_count:
+                parts.append(f"  Events: microsleep={ms_count}, head_down={hd_count}, head_roll={hr_count}")
+        else:
+            parts.append("  (no drowsy cases recorded yet)")
+
+        # Alert cases summary
+        parts.append(f"")
+        parts.append(f"## ALERT/MILD Cases ({len(alert_cases)} evaluations)")
+        if alert_cases:
+            for key, label, fmt in [
+                ('perclos', 'PERCLOS range', '.3f'),
+                ('energy_rms', 'Voice energy (RMS) range', '.4f'),
+                ('speech_rate_wpm', 'Speech rate range', '.1f'),
+            ]:
+                s = _metric_summary(alert_cases, key, fmt)
+                if s:
+                    unit = ' wpm' if 'rate' in key else ''
+                    parts.append(f"  {label}: {s}{unit}")
+
+        # Existing patterns for dedup
+        if existing_patterns:
+            parts.append("")
+            parts.append("## Already Known Patterns (avoid duplicating these)")
+            for pt, desc, times in existing_patterns:
+                parts.append(f"  - [{pt}] {desc} (observed {times}x)")
+
+        parts.append("")
+        parts.append("""Identify NEW patterns from this data. Look for:
+- What PERCLOS level reliably indicates drowsiness for this driver?
+- Does this driver show voice changes (quieter, slower, more pauses) when drowsy?
+- Are there audio-visual combinations unique to this driver (e.g. slow blinks + quiet voice)?
+- Does this driver have specific pre-drowsiness patterns (e.g. speech slows before eyes close)?
+- Any unusual patterns (e.g. high blink rate when drowsy instead of low)?
+
+Return a JSON array of patterns:
+[{"type": "visual_pattern|voice_pattern|combined_pattern|threshold_pattern|sequence_pattern", "description": "specific finding"}]
+
+Be specific with numbers. e.g. "Driver becomes drowsy when PERCLOS > 0.18 AND speech rate drops below 120 wpm" not "Driver shows drowsiness with high PERCLOS".
+Return [] if not enough data for meaningful patterns.""")
+
+        return "\n".join(parts)
+
+    def _store_pattern(self, pattern_type, description, timestamp):
+        """Store or update a driver pattern with dedup."""
+        with self._connect() as conn:
+            # Check for similar existing pattern (same type)
+            existing = conn.execute(
+                "SELECT id, times_observed FROM driver_patterns "
+                "WHERE pattern_type=? AND LOWER(description)=LOWER(?)",
+                (pattern_type, description)
+            ).fetchone()
+
+            if existing:
+                pid, count = existing
+                conn.execute("""
+                    UPDATE driver_patterns
+                    SET times_observed=?, last_seen=?,
+                        confidence=MIN(confidence + 0.1, 2.0)
+                    WHERE id=?
+                """, (count + 1, timestamp, pid))
+            else:
+                conn.execute("""
+                    INSERT INTO driver_patterns
+                    (pattern_type, description, confidence, times_observed,
+                     first_seen, last_seen)
+                    VALUES (?, ?, 1.0, 1, ?, ?)
+                """, (pattern_type, description, timestamp, timestamp))
+
+    def _get_existing_patterns(self):
+        """Get all driver patterns as [(type, description, times_observed)]."""
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT pattern_type, description, times_observed "
+                "FROM driver_patterns ORDER BY times_observed DESC"
+            ).fetchall()
+
+    def get_driver_patterns_for_reasoner(self):
+        """Format driver patterns as a string for the 8B reasoner's system prompt.
+
+        Returns a multi-line summary of what the system has learned about
+        this specific driver's drowsiness indicators.
+        """
+        patterns = self._get_existing_patterns()
+        if not patterns:
+            return ""
+
+        lines = []
+        for ptype, desc, times in patterns:
+            label = ptype.replace('_', ' ').title()
+            reliability = "" if times < 2 else f" (observed {times}x)"
+            lines.append(f"- [{label}] {desc}{reliability}")
+        return "\n".join(lines)
+
+    # ═══════════════════════════════════════════════════════════
     #  Transcript tracking
     # ═══════════════════════════════════════════════════════════
 
@@ -461,4 +760,17 @@ Example:
 
             print("\n═══ BASELINES ═══")
             for row in conn.execute("SELECT * FROM baselines").fetchall():
+                print(f"  {row}")
+
+            print("\n═══ DRIVER PATTERNS ═══")
+            for row in conn.execute(
+                "SELECT * FROM driver_patterns ORDER BY times_observed DESC"
+            ).fetchall():
+                print(f"  {row}")
+
+            print("\n═══ REASONER EVALUATIONS (last 20) ═══")
+            for row in conn.execute(
+                "SELECT id, session_id, level, confidence, reasoning "
+                "FROM reasoner_evaluations ORDER BY id DESC LIMIT 20"
+            ).fetchall():
                 print(f"  {row}")

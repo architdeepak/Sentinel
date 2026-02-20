@@ -14,6 +14,7 @@ import math
 import time
 import threading
 import numpy as np
+from collections import deque
 
 from config import Config
 
@@ -31,6 +32,13 @@ MOUTH_LANDMARKS = [13, 14, 61, 291]
 
 # Pre-computed threshold in radians (avoids np.degrees conversion per frame)
 _ROLL_THRESH_RAD = math.radians(Config.HEAD_ROLL_THRESH)
+
+# ── Color constants for overlay drawing (avoid re-creation every frame) ──
+_EYE_COLOR = (255, 0, 0)
+_MOUTH_COLOR = (0, 0, 255)
+_HEAD_COLOR = (0, 255, 0)
+_ALERT_COLOR = (0, 255, 0)
+_DROWSY_COLOR = (0, 0, 255)
 
 
 # =========================
@@ -206,16 +214,12 @@ def draw_overlay(frame, metrics, ear, mar, microsleep, head_down,
     font_scale = 0.5
     thickness = 1
 
-    EYE_COLOR = (255, 0, 0)
-    MOUTH_COLOR = (0, 0, 255)
-    HEAD_COLOR = (0, 255, 0)
-
     # ── Draw landmark points ──
     if landmarks:
         sx = w / proc_size[0]
         sy = h / proc_size[1]
-        for group, color in [('eye', EYE_COLOR), ('mouth', MOUTH_COLOR),
-                              ('head', HEAD_COLOR)]:
+        for group, color in [('eye', _EYE_COLOR), ('mouth', _MOUTH_COLOR),
+                              ('head', _HEAD_COLOR)]:
             for idx in _VIS_LANDMARKS[group]:
                 if idx < len(landmarks):
                     px = int(landmarks[idx][0] * sx)
@@ -224,16 +228,16 @@ def draw_overlay(frame, metrics, ear, mar, microsleep, head_down,
 
     # ── Draw text overlay ──
     texts = [
-        (f"PERCLOS: {metrics['perclos']:.2f}", EYE_COLOR),
-        (f"Blinks: {metrics['blink_rate']}", EYE_COLOR),
-        (f"EAR: {ear:.3f}", EYE_COLOR),
-        (f"MAR: {mar:.3f}", MOUTH_COLOR),
-        (f"Yawns: {len(state['yawn_times'])}", MOUTH_COLOR),
-        (f"Microsleep: {microsleep}", EYE_COLOR),
-        (f"Head Down: {head_down}", HEAD_COLOR),
+        (f"PERCLOS: {metrics['perclos']:.2f}", _EYE_COLOR),
+        (f"Blinks: {metrics['blink_rate']}", _EYE_COLOR),
+        (f"EAR: {ear:.3f}", _EYE_COLOR),
+        (f"MAR: {mar:.3f}", _MOUTH_COLOR),
+        (f"Yawns: {len(state['yawn_times'])}", _MOUTH_COLOR),
+        (f"Microsleep: {microsleep}", _EYE_COLOR),
+        (f"Head Down: {head_down}", _HEAD_COLOR),
     ]
 
-    drowsy_color = (0, 255, 0) if drowsy_state == "ALERT" else (0, 0, 255)
+    drowsy_color = _ALERT_COLOR if drowsy_state == "ALERT" else _DROWSY_COLOR
     texts.append((f"Score: {metrics['drowsy_score']:.2f} ({drowsy_state})", drowsy_color))
 
     for text, color in texts:
@@ -284,7 +288,6 @@ class DetectionThread:
 
     def _init_state(self):
         """Create a fresh state dict for the detection thread (no sharing)."""
-        from collections import deque
         _win = 200  # safety cap; time-based cleanup handles normal pruning
         return {
             'ear_window': deque(maxlen=_win),

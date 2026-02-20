@@ -40,6 +40,7 @@ from detection import (
     DetectionThread,
     format_detection_for_llm,
 )
+from metric_reasoner import MetricReasoner
 from dashboard import DashboardRenderer
 
 
@@ -84,7 +85,6 @@ def initialize_state_variables():
         'head_down_start': None,
         'head_roll_start': None,
         'llm_triggered': False,
-        'drowsy_count': 0,
         'window_start_time': time.time()
     }
 
@@ -151,8 +151,16 @@ def run_calibration(stt, voice_extractor, memory_manager):
 # =========================
 # MAIN DETECTION LOOP
 # =========================
-def run_detection_loop(cap, face_mesh, state):
-    """Run the main drowsiness detection loop."""
+def run_detection_loop(cap, face_mesh, state, reasoner):
+    """Run the main drowsiness detection loop with 8B reasoning gate.
+
+    Flow:
+      1. Every frame: compute local metrics (fast, no API)
+      2. Pre-filter: if local drowsy_score > REASONER_PRE_FILTER
+         AND enough time since last 8B call → call MetricReasoner
+      3. Reasoner confirms DROWSY/CRITICAL N consecutive times → trigger
+      4. Microsleep bypass: instant trigger (too critical for API latency)
+    """
     frame_skip = 2
     frame_count = 0
     final_metrics = None
@@ -192,13 +200,37 @@ def run_detection_loop(cap, face_mesh, state):
         cleanup_windows(state, now)
         metrics = calculate_metrics(state, microsleep, head_down, head_roll)
 
+        # ── 8B Reasoning Gate ──
         drowsy_state = "ALERT"
-        if metrics['drowsy_score'] > Config.DROWSY_THRESHOLD:
-            drowsy_state = "DROWSY"
-            state['drowsy_count'] += 1
+        reasoner_result = reasoner.get_last_result()
+
+        # Microsleep bypass — instant trigger, no API latency
+        if microsleep and not state['llm_triggered']:
+            print("\n🚨 MICROSLEEP DETECTED — instant trigger (bypassing 8B)")
+            state['llm_triggered'] = True
             final_metrics = metrics.copy()
-            final_metrics['microsleep'] = microsleep
+            final_metrics['microsleep'] = True
             final_metrics['head_down'] = head_down
+            drowsy_state = "CRITICAL"
+            draw_overlay(frame, metrics, ear, mar, microsleep, head_down,
+                         head_roll, state, drowsy_state, landmarks=landmarks,
+                         proc_size=(PROC_W, PROC_H))
+            cv2.imshow("Driver Drowsiness Monitor", frame)
+            cv2.waitKey(1)
+            return True, final_metrics
+
+        # Pre-filter gate: only call 8B when local score suggests possible drowsiness
+        if (metrics['drowsy_score'] > Config.REASONER_PRE_FILTER and
+                reasoner.should_call()):
+            result = reasoner.evaluate(metrics, microsleep, head_down, head_roll)
+            reasoner_result = result
+            level_label = f"{result.level} (conf={result.confidence:.2f})"
+            confirm = reasoner.get_confirmation_count()
+            print(f"\n🧠 8B Reasoner: {level_label} [{confirm}/{Config.REASONER_CONFIRM_COUNT}] — {result.reasoning}")
+
+        # Update display state from reasoner
+        if reasoner_result.is_drowsy():
+            drowsy_state = reasoner_result.level  # DROWSY or CRITICAL
 
         draw_overlay(frame, metrics, ear, mar, microsleep, head_down,
                      head_roll, state, drowsy_state, landmarks=landmarks,
@@ -211,10 +243,12 @@ def run_detection_loop(cap, face_mesh, state):
             print("📊 Monitoring ended by user")
             return False, None
 
-        if (state['drowsy_count'] >= Config.DROWSY_TRIGGER_COUNT and
-                drowsy_state == "DROWSY" and
-                not state['llm_triggered']):
+        # Trigger conversation when 8B confirms drowsiness N consecutive times
+        if (reasoner.is_confirmed_drowsy() and not state['llm_triggered']):
             state['llm_triggered'] = True
+            final_metrics = metrics.copy()
+            final_metrics['microsleep'] = microsleep
+            final_metrics['head_down'] = head_down
             return True, final_metrics
 
     return False, None
@@ -224,7 +258,7 @@ def run_detection_loop(cap, face_mesh, state):
 # LLM CONVERSATION (V7 — raw metrics + baselines + SQLite)
 # =========================
 def run_llm_conversation(tts, stt, llm_assistant, metrics, state,
-                         voice_extractor, memory_manager):
+                         voice_extractor, memory_manager, reasoner=None):
     """Run conversation loop with raw metric injection and SQLite session tracking.
 
     Architecture (Linux/RPi compatible):
@@ -264,9 +298,17 @@ def run_llm_conversation(tts, stt, llm_assistant, metrics, state,
         head_down=metrics.get('head_down', False),
     )
 
-    # Start conversation with raw metrics + baselines + session history
+    # Get 8B reasoning context for the 70B conversation model
+    reasoner_context = ""
+    if reasoner is not None:
+        reasoner_context = reasoner.get_reasoning_for_llm()
+
+    # Start conversation with raw metrics + baselines + 8B analysis + session history
     session_count = memory_manager.get_session_count() - 1  # -1 because we just started this one
-    llm_assistant.start_conversation(detection_context, baselines_str, max(0, session_count))
+    llm_assistant.start_conversation(
+        detection_context, baselines_str, max(0, session_count),
+        reasoner_context=reasoner_context,
+    )
 
     # ── Conversation worker (runs in background thread) ──
     conversation_done = threading.Event()
@@ -283,14 +325,17 @@ def run_llm_conversation(tts, stt, llm_assistant, metrics, state,
         max_turns = Config.MAX_CONVERSATION_TURNS
 
         def _handle_user_turn(text, audio):
-            """Extract raw features, get live detection, inject both to LLM."""
+            """Extract raw features, get live detection, inject both to LLM.
+            Also feeds voice features into the 8B reasoner for combined reasoning."""
             voice_context = None
+            latest_voice_features = None
             if audio is not None:
                 features = voice_extractor.extract_features(audio, text)
                 if features:
                     voice_context = voice_extractor.format_for_llm(features, baselines)
                     voice_accumulator.append(features)
                     dashboard.update_voice(features)
+                    latest_voice_features = features
 
             det_state = detection_thread.get_full_state()
             det_context = format_detection_for_llm(
@@ -299,6 +344,16 @@ def run_llm_conversation(tts, stt, llm_assistant, metrics, state,
                 head_down=det_state.get('head_down', False),
             )
             score_accumulator.append(det_state.get('drowsy_score', 0))
+
+            # Feed voice features into the 8B reasoner for combined reasoning
+            if (latest_voice_features and reasoner is not None
+                    and reasoner.should_call()):
+                reasoner.evaluate(
+                    det_state,
+                    microsleep=det_state.get('microsleep', False),
+                    head_down=det_state.get('head_down', False),
+                    voice_features=latest_voice_features,
+                )
 
             response = llm_assistant.get_response_streaming(
                 user_message=text,
@@ -388,6 +443,18 @@ def run_llm_conversation(tts, stt, llm_assistant, metrics, state,
     print("\n💾 Running LLM-based fact extraction...")
     memory_manager.extract_and_store_facts(session_id)
 
+    # Store 8B reasoner evaluations and learn driver patterns
+    if reasoner is not None:
+        eval_log = reasoner.get_evaluation_log()
+        if eval_log:
+            memory_manager.store_reasoner_evaluations(session_id, eval_log)
+            print(f"🧠 Running driver pattern learning ({len(eval_log)} evaluations)...")
+            memory_manager.learn_driver_patterns(session_id)
+            # Reload patterns into reasoner for next session
+            new_patterns = memory_manager.get_driver_patterns_for_reasoner()
+            if new_patterns:
+                reasoner.set_driver_patterns(new_patterns)
+
     # Update voice baselines from this session's voice data
     if voice_accumulator:
         avg_voice = {}
@@ -399,6 +466,9 @@ def run_llm_conversation(tts, stt, llm_assistant, metrics, state,
         if avg_voice:
             memory_manager.update_baselines_bulk(avg_voice)
             print(f"✓ Voice baselines updated from {len(voice_accumulator)} samples")
+            # Refresh reasoner's baselines with latest data
+            if reasoner is not None:
+                reasoner.set_voice_baselines(memory_manager.get_baselines())
 
     print("\n" + "=" * 60)
     print("✓ Session complete — Facts extracted — Baselines updated — Resuming monitoring")
@@ -449,17 +519,28 @@ def main():
               f"(RMS avg={rms_bl.get('avg', 0):.4f}, "
               f"rate avg={rate_bl.get('avg', 0):.1f} wpm)")
 
+    # Initialize 8B MetricReasoner (replaces hardcoded drowsy_score gate)
+    reasoner = MetricReasoner()
+
+    # Load learned driver patterns and voice baselines into reasoner
+    driver_patterns = memory_manager.get_driver_patterns_for_reasoner()
+    if driver_patterns:
+        reasoner.set_driver_patterns(driver_patterns)
+    baselines_for_reasoner = memory_manager.get_baselines()
+    if baselines_for_reasoner:
+        reasoner.set_voice_baselines(baselines_for_reasoner)
+
     cap = initialize_camera()
     face_mesh = initialize_mediapipe()
     state = initialize_state_variables()
 
-    print("\n✓ System ready — Starting monitoring...")
+    print("\n✓ System ready — Starting monitoring (8B reasoning gate active)...")
     tts.speak("Drowsiness monitoring system activated.")
 
     try:
         while True:
             should_trigger_llm, final_metrics = run_detection_loop(
-                cap, face_mesh, state
+                cap, face_mesh, state, reasoner
             )
 
             if not should_trigger_llm:
@@ -470,10 +551,10 @@ def main():
             face_mesh.close()
             cv2.destroyAllWindows()
 
-            # Run conversation with raw metric injection + SQLite session
+            # Run conversation with raw metric injection + 8B reasoning + SQLite session
             run_llm_conversation(
                 tts, stt, llm_assistant, final_metrics, state,
-                voice_extractor, memory_manager,
+                voice_extractor, memory_manager, reasoner=reasoner,
             )
 
             # Reopen camera for monitoring (retry — device may take time to release)
@@ -486,7 +567,7 @@ def main():
                     if cap.isOpened():
                         face_mesh = initialize_mediapipe()
                         state['llm_triggered'] = False
-                        state['drowsy_count'] = 0
+                        reasoner.reset()  # Reset 8B confirmation counter
                         reopen_ok = True
                         print("\n✓ Monitoring resumed\n")
                         break
