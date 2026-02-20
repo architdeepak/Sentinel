@@ -10,6 +10,7 @@ V7: Added format_detection_for_llm() — passes raw metrics to the LLM
 """
 
 import cv2
+import math
 import time
 import threading
 import numpy as np
@@ -28,26 +29,22 @@ FOREHEAD = 10
 CHIN = 152
 MOUTH_LANDMARKS = [13, 14, 61, 291]
 
+# Pre-computed threshold in radians (avoids np.degrees conversion per frame)
+_ROLL_THRESH_RAD = math.radians(Config.HEAD_ROLL_THRESH)
+
 
 # =========================
 # HELPER FUNCTIONS
 # =========================
-def euclidean(p1, p2):
-    """Calculate Euclidean distance between two points."""
-    dx = p1[0] - p2[0]
-    dy = p1[1] - p2[1]
-    return (dx * dx + dy * dy) ** 0.5
-
-
 def eye_aspect_ratio(landmarks, idx):
     """Calculate Eye Aspect Ratio (EAR)."""
     p1, p2, p3, p4, p5, p6 = [landmarks[i] for i in idx]
-    return (euclidean(p2, p6) + euclidean(p3, p5)) / (2.0 * euclidean(p1, p4))
+    return (math.dist(p2, p6) + math.dist(p3, p5)) / (2.0 * math.dist(p1, p4))
 
 
 def mouth_aspect_ratio(landmarks):
     """Calculate Mouth Aspect Ratio (MAR)."""
-    return euclidean(landmarks[13], landmarks[14]) / euclidean(landmarks[61], landmarks[291])
+    return math.dist(landmarks[13], landmarks[14]) / math.dist(landmarks[61], landmarks[291])
 
 
 # =========================
@@ -115,10 +112,10 @@ def process_head_roll(landmarks, state, now):
     """Process head roll (tilt) detection."""
     dx = landmarks[RIGHT_EYE_CORNER][0] - landmarks[LEFT_EYE_CORNER][0]
     dy = landmarks[RIGHT_EYE_CORNER][1] - landmarks[LEFT_EYE_CORNER][1]
-    roll = abs(np.degrees(np.arctan2(dy, dx)))
+    roll = abs(math.atan2(dy, dx))
 
     head_roll = False
-    if roll > Config.HEAD_ROLL_THRESH:
+    if roll > _ROLL_THRESH_RAD:
         if state['head_roll_start'] is None:
             state['head_roll_start'] = now
         elif now - state['head_roll_start'] > Config.ROLL_TIME:
@@ -191,8 +188,20 @@ def calculate_metrics(state, microsleep, head_down, head_roll):
     }
 
 
-def draw_overlay(frame, metrics, ear, mar, microsleep, head_down, head_roll, state, drowsy_state):
-    """Draw metrics overlay on the frame."""
+# Landmark indices to visualize (eyes, mouth, nose, brows, jawline subset)
+_VIS_LANDMARKS = {
+    'eye':   LEFT_EYE + RIGHT_EYE,                       # 12 pts
+    'mouth': MOUTH_LANDMARKS,                             # 4 pts
+    'head':  [NOSE_TIP, FOREHEAD, CHIN,                   # nose/forehead/chin
+              LEFT_EYE_CORNER, RIGHT_EYE_CORNER],         # eye corners for roll
+}
+
+
+def draw_overlay(frame, metrics, ear, mar, microsleep, head_down,
+                 head_roll, state, drowsy_state, landmarks=None,
+                 proc_size=(320, 240)):
+    """Draw metrics overlay and landmark points on the frame."""
+    h, w = frame.shape[:2]
     y = 25
     font_scale = 0.5
     thickness = 1
@@ -201,6 +210,19 @@ def draw_overlay(frame, metrics, ear, mar, microsleep, head_down, head_roll, sta
     MOUTH_COLOR = (0, 0, 255)
     HEAD_COLOR = (0, 255, 0)
 
+    # ── Draw landmark points ──
+    if landmarks:
+        sx = w / proc_size[0]
+        sy = h / proc_size[1]
+        for group, color in [('eye', EYE_COLOR), ('mouth', MOUTH_COLOR),
+                              ('head', HEAD_COLOR)]:
+            for idx in _VIS_LANDMARKS[group]:
+                if idx < len(landmarks):
+                    px = int(landmarks[idx][0] * sx)
+                    py = int(landmarks[idx][1] * sy)
+                    cv2.circle(frame, (px, py), 2, color, -1)
+
+    # ── Draw text overlay ──
     texts = [
         (f"PERCLOS: {metrics['perclos']:.2f}", EYE_COLOR),
         (f"Blinks: {metrics['blink_rate']}", EYE_COLOR),

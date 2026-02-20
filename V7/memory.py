@@ -14,7 +14,6 @@ V7 changes:
 """
 
 import json
-import time
 import sqlite3
 from pathlib import Path
 from datetime import datetime
@@ -30,6 +29,9 @@ class MemoryManager:
         self.db_path = db_path or (Path.home() / "sentinel_driver.db")
         self.conversation_transcript = []
         self._groq_client = None
+        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
         self._init_db()
 
     def _init_db(self):
@@ -69,8 +71,14 @@ class MemoryManager:
             """)
 
     def _connect(self):
-        """Return a new SQLite connection."""
-        return sqlite3.connect(str(self.db_path))
+        """Return the persistent SQLite connection."""
+        return self._conn
+
+    def close(self):
+        """Close the persistent DB connection."""
+        if self._conn:
+            self._conn.close()
+            self._conn = None
 
     # ═══════════════════════════════════════════════════════════
     #  Sessions
@@ -138,39 +146,36 @@ class MemoryManager:
             for row in rows
         }
 
-    def update_baseline(self, metric_name, new_value):
-        """Update a single baseline metric with a new observation (running average)."""
+    def update_baselines_bulk(self, metrics_dict):
+        """Update multiple baselines in a single transaction."""
         now = datetime.now().isoformat()
-        with self._connect() as conn:
-            existing = conn.execute(
+        for name, value in metrics_dict.items():
+            if value is None:
+                continue
+            existing = self._conn.execute(
                 "SELECT avg_value, min_value, max_value, sample_count "
                 "FROM baselines WHERE metric_name=?",
-                (metric_name,)
+                (name,)
             ).fetchone()
-
             if existing:
                 avg, mn, mx, count = existing
                 new_count = count + 1
-                new_avg = avg + (new_value - avg) / new_count
-                new_min = min(mn, new_value)
-                new_max = max(mx, new_value)
-                conn.execute("""
+                new_avg = avg + (value - avg) / new_count
+                self._conn.execute("""
                     UPDATE baselines
-                    SET avg_value=?, min_value=?, max_value=?, sample_count=?, updated_at=?
+                    SET avg_value=?, min_value=?, max_value=?,
+                        sample_count=?, updated_at=?
                     WHERE metric_name=?
-                """, (new_avg, new_min, new_max, new_count, now, metric_name))
+                """, (new_avg, min(mn, value), max(mx, value),
+                      new_count, now, name))
             else:
-                conn.execute("""
+                self._conn.execute("""
                     INSERT INTO baselines
-                    (metric_name, avg_value, min_value, max_value, sample_count, updated_at)
+                    (metric_name, avg_value, min_value, max_value,
+                     sample_count, updated_at)
                     VALUES (?, ?, ?, ?, 1, ?)
-                """, (metric_name, new_value, new_value, new_value, now))
-
-    def update_baselines_bulk(self, metrics_dict):
-        """Update multiple baselines at once. metrics_dict = {name: value}."""
-        for name, value in metrics_dict.items():
-            if value is not None:
-                self.update_baseline(name, value)
+                """, (name, value, value, value, now))
+        self._conn.commit()
 
     def store_calibration_baselines(self, samples):
         """Store baseline metrics from calibration (list of feature dicts).

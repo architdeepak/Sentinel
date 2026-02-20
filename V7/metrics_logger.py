@@ -7,7 +7,6 @@ Output: JSON log files in V5/test_logs/ directory.
 
 import json
 import time
-import os
 from pathlib import Path
 from datetime import datetime
 

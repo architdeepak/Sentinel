@@ -26,6 +26,16 @@ class TTSEngine:
         self._done_event = threading.Event()
         self._done_event.set()  # start as "done" (nothing pending)
 
+        self._dg_url = (
+            f"https://api.deepgram.com/v1/speak"
+            f"?model={Config.DEEPGRAM_TTS_VOICE}"
+            f"&encoding=mp3&speed={Config.DEEPGRAM_TTS_SPEED}"
+        )
+        self._dg_headers = {
+            "Authorization": f"Token {Config.DEEPGRAM_API_KEY}",
+            "Content-Type": "application/json",
+        }
+
         self._worker_thread = threading.Thread(target=self._worker, daemon=True)
         self._worker_thread.start()
 
@@ -45,6 +55,8 @@ class TTSEngine:
         Audio begins playing after the first ~1KB arrives (~100-200ms).
         No intermediate buffering.
         """
+        session = requests.Session()
+        session.headers.update(self._dg_headers)
         while True:
             text = self.audio_queue.get()
             if text is None:
@@ -54,23 +66,9 @@ class TTSEngine:
             t_start = time.perf_counter()
 
             try:
-                url = (
-                    f"https://api.deepgram.com/v1/speak"
-                    f"?model={Config.DEEPGRAM_TTS_VOICE}"
-                    f"&encoding=mp3"
-                    f"&speed={Config.DEEPGRAM_TTS_SPEED}"
-                )
-
-                headers = {
-                    "Authorization": f"Token {Config.DEEPGRAM_API_KEY}",
-                    "Content-Type": "application/json",
-                }
-
-                payload = {"text": text}
-
                 # Stream=True: iter_content yields chunks as they arrive
-                resp = requests.post(
-                    url, headers=headers, json=payload,
+                resp = session.post(
+                    self._dg_url, json={"text": text},
                     stream=True, timeout=15,
                 )
                 resp.raise_for_status()

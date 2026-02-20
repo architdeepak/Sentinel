@@ -39,6 +39,7 @@ from detection import (
     DetectionThread,
     format_detection_for_llm,
 )
+from dashboard import MetricsDashboard
 
 
 # =========================
@@ -176,6 +177,7 @@ def run_detection_loop(cap, face_mesh, state):
         head_roll = False
         ear = 0
         mar = 0
+        landmarks = None
 
         if results.multi_face_landmarks:
             lm = results.multi_face_landmarks[0].landmark
@@ -198,7 +200,8 @@ def run_detection_loop(cap, face_mesh, state):
             final_metrics['head_down'] = head_down
 
         draw_overlay(frame, metrics, ear, mar, microsleep, head_down,
-                     head_roll, state, drowsy_state)
+                     head_roll, state, drowsy_state, landmarks=landmarks,
+                     proc_size=(PROC_W, PROC_H))
 
         cv2.imshow("Driver Drowsiness Monitor", frame)
 
@@ -251,6 +254,10 @@ def run_llm_conversation(tts, stt, llm_assistant, metrics, state,
     baselines = memory_manager.get_baselines()
     baselines_str = memory_manager.format_baselines_for_llm()
 
+    # Live metrics dashboard
+    dashboard = MetricsDashboard(detection_thread, baselines=baselines)
+    dashboard.start()
+
     # Format initial detection context (raw numbers)
     detection_context = format_detection_for_llm(
         metrics,
@@ -278,6 +285,7 @@ def run_llm_conversation(tts, stt, llm_assistant, metrics, state,
             if features:
                 voice_context = voice_extractor.format_for_llm(features, baselines)
                 voice_accumulator.append(features)
+                dashboard.update_voice(features)
 
         # Detection (raw)
         det_state = detection_thread.get_full_state()
@@ -311,7 +319,6 @@ def run_llm_conversation(tts, stt, llm_assistant, metrics, state,
                 break
 
             _handle_user_turn(user_input, audio_data)
-            time.sleep(0.3)
         else:
             print("⚠️  No response detected")
             tts.speak("Are you still there? Give me a quick response if you can hear me.")
@@ -326,8 +333,9 @@ def run_llm_conversation(tts, stt, llm_assistant, metrics, state,
                 break
             _handle_user_turn(retry_input, retry_audio)
 
-    # Stop background detection
+    # Stop background detection + dashboard
     detection_thread.stop()
+    dashboard.stop()
 
     # ── Post-session processing ──
     session_duration = time.perf_counter() - session_start
@@ -465,6 +473,7 @@ def main():
         cv2.destroyAllWindows()
         stt.cleanup()
         tts.shutdown()
+        memory_manager.close()
         print("✓ Cleanup complete")
 
 

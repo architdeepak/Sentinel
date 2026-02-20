@@ -23,6 +23,16 @@ class STTEngine:
         self.recognizer = sr.Recognizer()
         self.mic = None
         self.metrics_logger = None   # Set externally for benchmarking
+        self._session = requests.Session()
+        self._dg_url = (
+            f"https://api.deepgram.com/v1/listen"
+            f"?model={Config.DEEPGRAM_STT_MODEL}"
+            f"&smart_format=true&punctuate=true"
+        )
+        self._session.headers.update({
+            "Authorization": f"Token {Config.DEEPGRAM_API_KEY}",
+            "Content-Type": "audio/wav",
+        })
         self._initialize()
 
     def _initialize(self):
@@ -59,19 +69,7 @@ class STTEngine:
         # Convert to WAV bytes (16-bit PCM) for Deepgram
         wav_data = audio.get_wav_data(convert_rate=16000, convert_width=2)
 
-        url = (
-            f"https://api.deepgram.com/v1/listen"
-            f"?model={Config.DEEPGRAM_STT_MODEL}"
-            f"&smart_format=true"
-            f"&punctuate=true"
-        )
-
-        headers = {
-            "Authorization": f"Token {Config.DEEPGRAM_API_KEY}",
-            "Content-Type": "audio/wav",
-        }
-
-        resp = requests.post(url, headers=headers, data=wav_data, timeout=15)
+        resp = self._session.post(self._dg_url, data=wav_data, timeout=15)
         resp.raise_for_status()
 
         result = resp.json()
@@ -131,4 +129,4 @@ class STTEngine:
 
     def cleanup(self):
         """Cleanup resources."""
-        pass
+        self._session.close()
