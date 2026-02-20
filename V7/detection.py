@@ -253,12 +253,14 @@ class DetectionThread:
     loop must release its camera BEFORE starting this thread (RPi only has
     one camera device, can't open two handles).
 
-    Uses DETECTION_FRAME_SKIP to reduce CPU during conversation (detection is
-    secondary while speech/LLM are active).
+    Renders the camera overlay and optional dashboard onto frames stored in
+    shared buffers.  Does NOT call cv2.imshow — the main thread reads the
+    frames via get_display_frames() and shows them (required on Linux/RPi
+    where imshow must come from the main thread).
     """
 
-    def __init__(self, show_display=False):
-        self._show_display = show_display
+    def __init__(self, dashboard=None):
+        self._dashboard = dashboard  # DashboardRenderer instance (or None)
         # Shared metrics (protected by lock)
         self._lock = threading.Lock()
         self._latest_metrics = {
@@ -271,6 +273,11 @@ class DetectionThread:
         }
         self._microsleep = False
         self._head_down = False
+
+        # Shared display frames (main thread reads these for imshow)
+        self._frame_lock = threading.Lock()
+        self._latest_frame = None      # camera with overlay
+        self._latest_dash = None       # dashboard panel
 
         self._running = False
         self._thread = None
@@ -319,6 +326,17 @@ class DetectionThread:
             m['microsleep'] = self._microsleep
             m['head_down'] = self._head_down
             return m
+
+    def get_display_frames(self):
+        """Return (camera_frame, dashboard_frame) for main-thread imshow.
+
+        Returns (None, None) if no frames are available yet.
+        Frames are already rendered with overlays/metrics.
+        """
+        with self._frame_lock:
+            cam = self._latest_frame.copy() if self._latest_frame is not None else None
+            dash = self._latest_dash.copy() if self._latest_dash is not None else None
+        return cam, dash
 
     def _detection_loop(self):
         """Background loop with its own camera and FaceMesh (thread-safe)."""
@@ -402,14 +420,24 @@ class DetectionThread:
                     self._microsleep = microsleep
                     self._head_down = head_down
 
-                # Show camera overlay if display mode is on
-                if self._show_display:
-                    drowsy_state = "DROWSY" if metrics['drowsy_score'] > Config.DROWSY_THRESHOLD else "ALERT"
-                    draw_overlay(frame, metrics, ear, mar, microsleep, head_down,
-                                 head_roll, state, drowsy_state, landmarks=landmarks,
-                                 proc_size=(PROC_W, PROC_H))
-                    cv2.imshow("Driver Drowsiness Monitor", frame)
-                    cv2.waitKey(1)
+                # Render overlay onto frame and store in shared buffer
+                drowsy_state = "DROWSY" if metrics['drowsy_score'] > Config.DROWSY_THRESHOLD else "ALERT"
+                draw_overlay(frame, metrics, ear, mar, microsleep, head_down,
+                             head_roll, state, drowsy_state, landmarks=landmarks,
+                             proc_size=(PROC_W, PROC_H))
+
+                # Render dashboard panel if available
+                dash_img = None
+                if self._dashboard is not None:
+                    full_state = metrics.copy()
+                    full_state['microsleep'] = microsleep
+                    full_state['head_down'] = head_down
+                    dash_img = self._dashboard.render(full_state)
+
+                # Store frames for main thread to display
+                with self._frame_lock:
+                    self._latest_frame = frame
+                    self._latest_dash = dash_img
 
                 # Throttle to target FPS
                 time.sleep(1.0 / Config.DETECTION_THREAD_FPS)
@@ -418,11 +446,6 @@ class DetectionThread:
             # Always release thread-local resources
             cap.release()
             face_mesh.close()
-            if self._show_display:
-                try:
-                    cv2.destroyWindow("Driver Drowsiness Monitor")
-                except Exception:
-                    pass
 
 
 # =========================

@@ -20,6 +20,7 @@ Usage:
 import cv2
 import mediapipe as mp
 import time
+import threading
 from collections import deque
 
 from config import Config
@@ -39,7 +40,7 @@ from detection import (
     DetectionThread,
     format_detection_for_llm,
 )
-from dashboard import MetricsDashboard
+from dashboard import DashboardRenderer
 
 
 # =========================
@@ -226,12 +227,11 @@ def run_llm_conversation(tts, stt, llm_assistant, metrics, state,
                          voice_extractor, memory_manager):
     """Run conversation loop with raw metric injection and SQLite session tracking.
 
-    V7 flow:
-      1. Start SQLite session
-      2. DetectionThread provides live raw metrics each turn
-      3. VoiceFeatureExtractor provides raw voice metrics + baseline comparison
-      4. Both injected to LLM as raw numbers — LLM reasons about severity
-      5. Post-session: 8B model extracts facts → SQLite, baselines updated
+    Architecture (Linux/RPi compatible):
+      - Main thread: display loop (cv2.imshow) — required on Linux
+      - Conversation thread: STT/LLM/TTS blocking calls
+      - DetectionThread: camera + metrics + renders frames to shared buffer
+      - DashboardRenderer: renders metrics panel (called by DetectionThread)
     """
     print("\n" + "=" * 60)
     print("💬 STARTING CONVERSATION (V7 — raw metrics + baselines + SQLite)")
@@ -246,17 +246,16 @@ def run_llm_conversation(tts, stt, llm_assistant, metrics, state,
     score_accumulator = []
     voice_accumulator = []
 
-    # Detection thread (own camera + FaceMesh) — with live camera overlay
-    detection_thread = DetectionThread(show_display=True)
-    detection_thread.start()
-
     # Get baselines for voice comparison
     baselines = memory_manager.get_baselines()
     baselines_str = memory_manager.format_baselines_for_llm()
 
-    # Live metrics dashboard
-    dashboard = MetricsDashboard(detection_thread, baselines=baselines)
-    dashboard.start()
+    # Dashboard renderer (stateless — called by DetectionThread each frame)
+    dashboard = DashboardRenderer(baselines=baselines)
+
+    # Detection thread (own camera + FaceMesh) — renders frames to buffer
+    detection_thread = DetectionThread(dashboard=dashboard)
+    detection_thread.start()
 
     # Format initial detection context (raw numbers)
     detection_context = format_detection_for_llm(
@@ -269,84 +268,107 @@ def run_llm_conversation(tts, stt, llm_assistant, metrics, state,
     session_count = memory_manager.get_session_count() - 1  # -1 because we just started this one
     llm_assistant.start_conversation(detection_context, baselines_str, max(0, session_count))
 
-    # Get opening message
-    opening = llm_assistant.get_response_streaming()
-    tts.wait_until_done()
-    voice_extractor.mark_prompt_end()
+    # ── Conversation worker (runs in background thread) ──
+    conversation_done = threading.Event()
 
-    # Conversation loop
-    max_turns = Config.MAX_CONVERSATION_TURNS
+    def _conversation_worker():
+        """Full conversation logic — runs in a background thread so the
+        main thread can keep refreshing the display on Linux/RPi."""
 
-    def _handle_user_turn(text, audio):
-        """Extract raw features, get live detection, inject both to LLM.
-        Returns the LLM response text."""
-        # Voice features (raw)
-        voice_context = None
-        if audio is not None:
-            features = voice_extractor.extract_features(audio, text)
-            if features:
-                voice_context = voice_extractor.format_for_llm(features, baselines)
-                voice_accumulator.append(features)
-                dashboard.update_voice(features)
-
-        # Detection (raw)
-        det_state = detection_thread.get_full_state()
-        det_context = format_detection_for_llm(
-            det_state,
-            microsleep=det_state.get('microsleep', False),
-            head_down=det_state.get('head_down', False),
-        )
-        score_accumulator.append(det_state.get('drowsy_score', 0))
-
-        # LLM gets raw numbers for both
-        response = llm_assistant.get_response_streaming(
-            user_message=text,
-            detection_context=det_context,
-            voice_context=voice_context,
-        )
+        # Get opening message
+        opening = llm_assistant.get_response_streaming()
         tts.wait_until_done()
         voice_extractor.mark_prompt_end()
-        return response
 
-    # Only explicit exit phrases — NOT common words like "fine" or "alert"
-    hard_exit = {'exit', 'quit', 'bye', 'goodbye', 'bye bye', 'stop talking'}
+        max_turns = Config.MAX_CONVERSATION_TURNS
 
-    for turn in range(max_turns):
-        user_input, audio_data = stt.listen(timeout=20, show_diagnostics=False)
+        def _handle_user_turn(text, audio):
+            """Extract raw features, get live detection, inject both to LLM."""
+            voice_context = None
+            if audio is not None:
+                features = voice_extractor.extract_features(audio, text)
+                if features:
+                    voice_context = voice_extractor.format_for_llm(features, baselines)
+                    voice_accumulator.append(features)
+                    dashboard.update_voice(features)
 
-        if user_input:
-            if user_input.lower().strip() in hard_exit:
-                print("🔚 User requested exit")
-                tts.speak("Alright, I'll be here if you need me. Stay safe!")
-                tts.wait_until_done()
-                break
+            det_state = detection_thread.get_full_state()
+            det_context = format_detection_for_llm(
+                det_state,
+                microsleep=det_state.get('microsleep', False),
+                head_down=det_state.get('head_down', False),
+            )
+            score_accumulator.append(det_state.get('drowsy_score', 0))
 
-            response = _handle_user_turn(user_input, audio_data)
-
-            # LLM decides when driver has recovered (via [RECOVERED] tag)
-            if response and "[RECOVERED]" in response:
-                print("🟢 LLM determined driver has recovered")
-                break
-        else:
-            print("⚠️  No response detected")
-            tts.speak("Are you still there? Give me a quick response if you can hear me.")
+            response = llm_assistant.get_response_streaming(
+                user_message=text,
+                detection_context=det_context,
+                voice_context=voice_context,
+            )
             tts.wait_until_done()
             voice_extractor.mark_prompt_end()
+            return response
 
-            retry_input, retry_audio = stt.listen(timeout=15, show_diagnostics=False)
-            if not retry_input:
-                print("⚠️  Still no response — ending conversation")
-                tts.speak("I'll keep monitoring. Stay safe!")
+        hard_exit = {'exit', 'quit', 'bye', 'goodbye', 'bye bye', 'stop talking'}
+
+        for turn in range(max_turns):
+            user_input, audio_data = stt.listen(timeout=20, show_diagnostics=False)
+
+            if user_input:
+                if user_input.lower().strip() in hard_exit:
+                    print("🔚 User requested exit")
+                    tts.speak("Alright, I'll be here if you need me. Stay safe!")
+                    tts.wait_until_done()
+                    break
+
+                response = _handle_user_turn(user_input, audio_data)
+                if response and "[RECOVERED]" in response:
+                    print("🟢 LLM determined driver has recovered")
+                    break
+            else:
+                print("⚠️  No response detected")
+                tts.speak("Are you still there? Give me a quick response if you can hear me.")
                 tts.wait_until_done()
-                break
-            response = _handle_user_turn(retry_input, retry_audio)
-            if response and "[RECOVERED]" in response:
-                print("🟢 LLM determined driver has recovered")
-                break
+                voice_extractor.mark_prompt_end()
 
-    # Stop background detection + dashboard
+                retry_input, retry_audio = stt.listen(timeout=15, show_diagnostics=False)
+                if not retry_input:
+                    print("⚠️  Still no response — ending conversation")
+                    tts.speak("I'll keep monitoring. Stay safe!")
+                    tts.wait_until_done()
+                    break
+                response = _handle_user_turn(retry_input, retry_audio)
+                if response and "[RECOVERED]" in response:
+                    print("🟢 LLM determined driver has recovered")
+                    break
+
+        conversation_done.set()
+
+    # Start conversation in background thread
+    conv_thread = threading.Thread(target=_conversation_worker, daemon=True)
+    conv_thread.start()
+
+    # ── Main thread: display loop (required on Linux/RPi) ──
+    while not conversation_done.is_set():
+        cam_frame, dash_frame = detection_thread.get_display_frames()
+        if cam_frame is not None:
+            cv2.imshow("Driver Drowsiness Monitor", cam_frame)
+        if dash_frame is not None:
+            cv2.imshow("Sentinel Dashboard", dash_frame)
+        key = cv2.waitKey(33) & 0xFF  # ~30 FPS
+        if key == 27:
+            print("⚠️ ESC pressed — ending conversation")
+            conversation_done.set()
+            break
+
+    # Wait for conversation thread to finish
+    conv_thread.join(timeout=5.0)
+
+    # Close conversation windows
     detection_thread.stop()
-    dashboard.stop()
+    cv2.destroyWindow("Driver Drowsiness Monitor")
+    cv2.destroyWindow("Sentinel Dashboard")
+    cv2.waitKey(1)
 
     # ── Post-session processing ──
     session_duration = time.perf_counter() - session_start
