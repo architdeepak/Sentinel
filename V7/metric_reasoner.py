@@ -133,10 +133,10 @@ How long after being asked a question the driver starts speaking.
 The most reliable drowsiness detection comes from BOTH modalities confirming:
 - **Visual drowsy + Voice drowsy** = Very high confidence. PERCLOS elevated AND speech quieter/slower.
 - **Visual drowsy + Voice normal** = Moderate confidence. Could be just eye fatigue. Monitor closely.
-- **Visual normal + Voice drowsy** = Moderate confidence. Voice changes sometimes precede visual signs.
+- **Visual normal + Voice drowsy** = LOW confidence. Voice alone is NOT enough to classify as drowsy. People naturally vary in how they speak — some talk quieter, slower, or with more pauses depending on context, mood, or the topic. Only flag if voice metrics are DRAMATICALLY below baseline (45%+ drop in energy, 40%+ drop in speech rate).
 - **Visual normal + Voice normal** = ALERT.
 
-Voice changes often appear BEFORE visual signs — slowing speech and longer pauses can precede eye closure. Weight voice trends heavily when they diverge from visual data.
+Voice metrics are SUPPLEMENTARY — they strengthen visual evidence but should NEVER be the primary reason for a DROWSY classification. If eyes and head are fine, the driver is almost certainly alert regardless of voice.
 
 ## Important Reasoning Guidelines
 

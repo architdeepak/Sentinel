@@ -116,8 +116,8 @@ class TTSEngine:
     def _start_player():
         """Start mpg123 (or ffplay fallback) and return the Popen handle."""
         for cmd in [
-            ["mpg123", "-q", "-"],
-            ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", "-"],
+            ["mpg123", "-q", "--scale", "32768", "-"],   # --scale amplifies output (max 32768)
+            ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", "-volume", "100", "-"],
         ]:
             try:
                 return subprocess.Popen(

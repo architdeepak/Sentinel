@@ -30,6 +30,8 @@ from stt_engine import STTEngine
 from llm_assistant import LLMAssistant
 from voice_features import VoiceFeatureExtractor
 from detection import (
+    eye_aspect_ratio,
+    LEFT_EYE, RIGHT_EYE,
     process_eye_metrics,
     process_mouth_metrics,
     process_head_pitch,
@@ -87,6 +89,60 @@ def initialize_state_variables():
         'llm_triggered': False,
         'window_start_time': time.time()
     }
+
+
+def run_ear_calibration(cap, face_mesh, duration=5.0):
+    """Measure the driver's personal EAR baseline over `duration` seconds.
+
+    Returns a calibrated EAR closed-eye threshold, or the config default
+    if calibration fails (e.g. face not detected).
+    """
+    print(f"\n👁️  EAR Calibration — look at the camera with eyes open for {duration:.0f}s...")
+    PROC_W, PROC_H = 320, 240
+    ear_samples = []
+    start = time.time()
+
+    while time.time() - start < duration:
+        ret, frame = cap.read()
+        if not ret:
+            continue
+        small = cv2.resize(frame, (PROC_W, PROC_H))
+        rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+        results = face_mesh.process(rgb)
+
+        if results.multi_face_landmarks:
+            lm = results.multi_face_landmarks[0].landmark
+            landmarks = [(int(p.x * PROC_W), int(p.y * PROC_H)) for p in lm]
+            ear = (eye_aspect_ratio(landmarks, LEFT_EYE) +
+                   eye_aspect_ratio(landmarks, RIGHT_EYE)) / 2
+            ear_samples.append(ear)
+
+        # Show progress
+        elapsed = time.time() - start
+        cv2.putText(frame, f"EAR Calibration: {elapsed:.1f}/{duration:.0f}s",
+                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        cv2.imshow("Driver Drowsiness Monitor", frame)
+        cv2.waitKey(1)
+
+    if len(ear_samples) < 20:
+        print(f"  ⚠️ Not enough face detections ({len(ear_samples)}) — using default EAR threshold {Config.EAR_THRESH}")
+        return Config.EAR_THRESH
+
+    import numpy as np
+    ear_arr = np.array(ear_samples)
+    avg_ear = float(np.mean(ear_arr))
+    std_ear = float(np.std(ear_arr))
+
+    # Threshold = 75% of their average open-eye EAR
+    # This accounts for individual eye geometry
+    calibrated_thresh = round(avg_ear * 0.75, 3)
+
+    # Safety clamp: never go below 0.15 or above 0.28
+    calibrated_thresh = max(0.15, min(0.28, calibrated_thresh))
+
+    print(f"  ✓ EAR Calibration complete: avg={avg_ear:.3f}, std={std_ear:.3f}")
+    print(f"  ✓ Personal EAR threshold: {calibrated_thresh} (vs default {Config.EAR_THRESH})")
+    return calibrated_thresh
 
 
 # =========================
@@ -151,7 +207,7 @@ def run_calibration(stt, voice_extractor, memory_manager):
 # =========================
 # MAIN DETECTION LOOP
 # =========================
-def run_detection_loop(cap, face_mesh, state, reasoner):
+def run_detection_loop(cap, face_mesh, state, reasoner, ear_thresh=None):
     """Run the main drowsiness detection loop with 8B reasoning gate.
 
     Flow:
@@ -192,7 +248,7 @@ def run_detection_loop(cap, face_mesh, state, reasoner):
             lm = results.multi_face_landmarks[0].landmark
             landmarks = [(int(p.x * PROC_W), int(p.y * PROC_H)) for p in lm]
 
-            ear, microsleep = process_eye_metrics(landmarks, state, now)
+            ear, microsleep = process_eye_metrics(landmarks, state, now, ear_thresh=ear_thresh)
             mar = process_mouth_metrics(landmarks, state, now)
             head_down = process_head_pitch(landmarks, state, now)
             head_roll = process_head_roll(landmarks, state, now)
@@ -259,7 +315,8 @@ def run_detection_loop(cap, face_mesh, state, reasoner):
 # LLM CONVERSATION (V7 — raw metrics + baselines + SQLite)
 # =========================
 def run_llm_conversation(tts, stt, llm_assistant, metrics, state,
-                         voice_extractor, memory_manager, reasoner=None):
+                         voice_extractor, memory_manager, reasoner=None,
+                         ear_thresh=None):
     """Run conversation loop with raw metric injection and SQLite session tracking.
 
     Architecture (Linux/RPi compatible):
@@ -289,7 +346,7 @@ def run_llm_conversation(tts, stt, llm_assistant, metrics, state,
     dashboard = DashboardRenderer(baselines=baselines)
 
     # Detection thread (own camera + FaceMesh) — renders frames to buffer
-    detection_thread = DetectionThread(dashboard=dashboard)
+    detection_thread = DetectionThread(dashboard=dashboard, ear_thresh=ear_thresh)
     detection_thread.start()
 
     # Format initial detection context (raw numbers)
@@ -533,13 +590,16 @@ def main():
     face_mesh = initialize_mediapipe()
     state = initialize_state_variables()
 
+    # Calibrate EAR threshold for this driver's eye geometry
+    ear_thresh = run_ear_calibration(cap, face_mesh)
+
     print("\n✓ System ready — Starting monitoring (8B reasoning gate active)...")
     tts.speak("Drowsiness monitoring system activated.")
 
     try:
         while True:
             should_trigger_llm, final_metrics = run_detection_loop(
-                cap, face_mesh, state, reasoner
+                cap, face_mesh, state, reasoner, ear_thresh=ear_thresh
             )
 
             if not should_trigger_llm:
@@ -558,6 +618,7 @@ def main():
             run_llm_conversation(
                 tts, stt, llm_assistant, final_metrics, state,
                 voice_extractor, memory_manager, reasoner=reasoner,
+                ear_thresh=ear_thresh,
             )
 
             # Reopen camera for monitoring (retry — device may take time to release)

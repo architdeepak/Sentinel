@@ -58,15 +58,17 @@ def mouth_aspect_ratio(landmarks):
 # =========================
 # DETECTION FUNCTIONS
 # =========================
-def process_eye_metrics(landmarks, state, now):
+def process_eye_metrics(landmarks, state, now, ear_thresh=None):
     """Process eye-related metrics and detect microsleep."""
     ear = (eye_aspect_ratio(landmarks, LEFT_EYE) +
            eye_aspect_ratio(landmarks, RIGHT_EYE)) / 2
 
-    state['ear_window'].append((now, ear))
-    state['closed_window'].append((now, ear < Config.EAR_THRESH))
+    thresh = ear_thresh if ear_thresh is not None else Config.EAR_THRESH
 
-    if ear < Config.EAR_THRESH:
+    state['ear_window'].append((now, ear))
+    state['closed_window'].append((now, ear < thresh))
+
+    if ear < thresh:
         if state['eye_closed_start'] is None:
             state['eye_closed_start'] = now
             state['blink_start'] = now
@@ -180,8 +182,8 @@ def calculate_metrics(state, microsleep, head_down, head_roll):
     drowsy_score = min(1.0, (
         0.30 * perclos +
         0.20 * int(microsleep) +
-        0.20 * min(slow_blinks / 5, 1.0) +
-        0.15 * min(ear_std / 0.12, 1.0) +
+        0.20 * min(slow_blinks / 8, 1.0) +
+        0.15 * min(ear_std / 0.20, 1.0) +
         0.05 * min(pitch_var / 0.015, 1.0) +
         0.05 * int(head_down) +
         0.05 * int(head_roll)
@@ -264,8 +266,9 @@ class DetectionThread:
     where imshow must come from the main thread).
     """
 
-    def __init__(self, dashboard=None):
+    def __init__(self, dashboard=None, ear_thresh=None):
         self._dashboard = dashboard  # DashboardRenderer instance (or None)
+        self._ear_thresh = ear_thresh  # Calibrated EAR threshold (or None for default)
         # Shared metrics (protected by lock)
         self._lock = threading.Lock()
         self._latest_metrics = {
@@ -410,7 +413,7 @@ class DetectionThread:
                     lm = results.multi_face_landmarks[0].landmark
                     landmarks = [(int(p.x * PROC_W), int(p.y * PROC_H)) for p in lm]
 
-                    ear, microsleep = process_eye_metrics(landmarks, state, now)
+                    ear, microsleep = process_eye_metrics(landmarks, state, now, ear_thresh=self._ear_thresh)
                     mar = process_mouth_metrics(landmarks, state, now)
                     head_down = process_head_pitch(landmarks, state, now)
                     head_roll = process_head_roll(landmarks, state, now)

@@ -38,10 +38,10 @@ class Config:
     CAMERA_FPS = 20
 
     # ── Detection thresholds (trigger only — LLM reasons about severity) ──
-    EAR_THRESH = 0.25
+    EAR_THRESH = 0.20          # Default fallback; overridden by EAR calibration at startup
     MAR_THRESH = 0.6
     MICROSLEEP_TIME = 1.5
-    SLOW_BLINK_TIME = 0.4
+    SLOW_BLINK_TIME = 0.55       # Only genuinely slow/droopy blinks (normal ≤ 0.4s)
     HEAD_DOWN_THRESH = 0.12
     HEAD_DOWN_TIME = 1.2
     HEAD_ROLL_THRESH = 15
