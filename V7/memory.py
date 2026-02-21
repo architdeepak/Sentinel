@@ -111,6 +111,19 @@ class MemoryManager:
             self._conn.close()
             self._conn = None
 
+    def reset_database(self):
+        """Drop all tables and recreate them. Irreversible."""
+        with self._connect() as conn:
+            conn.executescript("""
+                DROP TABLE IF EXISTS facts;
+                DROP TABLE IF EXISTS sessions;
+                DROP TABLE IF EXISTS baselines;
+                DROP TABLE IF EXISTS reasoner_evaluations;
+                DROP TABLE IF EXISTS driver_patterns;
+            """)
+        self._init_db()
+        print(f"\u2713 Database reset: {self.db_path}")
+
     # ═══════════════════════════════════════════════════════════
     #  Sessions
     # ═══════════════════════════════════════════════════════════

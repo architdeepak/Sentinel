@@ -46,123 +46,37 @@ class ReasonerResult:
 
 
 # ── System prompt for the 8B reasoning model ──
-_REASONER_SYSTEM_PROMPT = """You are an expert drowsiness detection system analyzing real-time driver monitoring data. Your ONLY job is to determine the driver's alertness level from raw sensor metrics.
+_REASONER_SYSTEM_PROMPT = """You are a drowsiness detection system. Classify the driver as ALERT, MILD, DROWSY, or CRITICAL from raw sensor metrics.
 
-## Your Task
-Given a snapshot of detection metrics (and recent history when available), classify the driver into one of four levels:
-- **ALERT**: Driver shows normal alertness. Minor fluctuations are normal.
-- **MILD**: Some early signs of fatigue, but not actionable yet. Worth monitoring.
-- **DROWSY**: Clear drowsiness signals that warrant intervention (triggering a conversation).
-- **CRITICAL**: Severe drowsiness or microsleep — immediate intervention needed.
+## Metric Guide
+- **PERCLOS** (0-1): Fraction of time eyes closed in 10s. <0.10 normal, 0.10-0.20 slightly elevated, >0.20 concerning, >0.40 severe.
+- **Blink Rate** (count/10s): Normal 2-4. Very low (0-1) or high (5+) can indicate fatigue.
+- **Slow Blinks** (count): Blinks >0.4s. 0=normal, 1-2=early fatigue, 3+=strong drowsiness.
+- **EAR Std**: Eye Aspect Ratio variability. Near zero+high PERCLOS=bad. 0.02-0.06=normal blinking. >0.08=erratic.
+- **Pitch Variance**: Head nodding. <0.002=stable, >0.010=head bobbing (strong sign).
+- **Microsleep** (bool): Eyes closed >1.5s. If True → always CRITICAL.
+- **Head Down/Roll** (bool): UNRELIABLE — many false positives from normal driving. IGNORE unless PERCLOS>0.20 AND slow_blinks>=2.
 
-## Metric Reference
+## Voice Metrics (when present)
+Compare to personal baseline. Natural variation of ±30% is NORMAL.
+- **Energy RMS**: 45%+ drop from baseline = drowsy. 20-45% drop = possible, needs corroboration.
+- **Speech Rate**: 40%+ drop = drowsy. 20-40% = possible.
+- **Pause Ratio**: 75%+ above baseline = drowsy.
+- **Response Latency**: 5s+ above baseline = drowsy.
 
-### PERCLOS (0.0–1.0)
-Fraction of time eyes were closed in the last 10 seconds.
-- <0.10: Normal (typical alert driver)
-- 0.10–0.20: Slightly elevated, could be normal variation
-- 0.20–0.40: Concerning — eyes closing more than expected
-- >0.40: Severe — eyes closed a large portion of the time
+Voice is SUPPLEMENTARY — strengthens visual evidence but NEVER the primary reason for DROWSY. If eyes/head are fine, driver is alert regardless of voice.
 
-### Blink Rate (count in 10s window)
-Number of blinks detected in the last 10 seconds. Normal is ~2-4 per 10s.
-- Very low (0-1): Could indicate staring/fatigue suppression
-- Normal (2-4): Healthy blinking
-- High (5+): Could indicate fighting to stay awake
+## Rules
+1. No single metric is conclusive — look for CONVERGENCE of multiple signals.
+2. Microsleep=True → always CRITICAL.
+3. PERCLOS and slow_blinks are most reliable. EAR std and pitch_var are supplementary.
+4. Trends matter: if metrics are IMPROVING, downgrade assessment. Current metrics > past ones.
+5. Every evaluation is INDEPENDENT — don't anchor to previous results.
+6. ALERT is the default unless clear evidence says otherwise.
+7. Head_down and head_roll alone mean NOTHING.
 
-### Slow Blinks (count)
-Blinks lasting >0.4 seconds. These are "droopy" blinks where eyelids are heavy.
-- 0: Normal
-- 1-2: Some slow blinks — early fatigue sign
-- 3+: Multiple slow blinks — strong drowsiness indicator
-
-### EAR Std (standard deviation)
-Eye Aspect Ratio variability over the window.
-- Near zero WITH high PERCLOS: Eyes stuck closed — very bad
-- Near zero WITH low PERCLOS: Steady open eyes — fine
-- Some variability (0.02–0.06): Normal blinking patterns
-- High variability (>0.08): Erratic eye behavior
-
-### Pitch Variance
-Head vertical tilt variance (nodding detection).
-- Near zero (<0.002): Stable head — normal
-- Moderate (0.002–0.010): Some head movement — could be looking around
-- High (>0.010): Head bobbing/nodding — strong drowsiness sign
-
-### Microsleep (boolean)
-True if eyes have been continuously closed for >1.5 seconds.
-This is the most CRITICAL signal — if True, the driver may be falling asleep at the wheel.
-
-### Head Down (boolean)
-True if head has been tilted downward for an extended period (>1.2 seconds).
-**WARNING: This metric is UNRELIABLE and produces many false positives.** Normal head movement (looking at dashboard, adjusting mirrors, glancing at phone holder) can trigger it. NEVER use head_down alone as evidence of drowsiness. Only count it if MULTIPLE other strong signals (high PERCLOS, slow blinks, microsleep) are also present.
-
-### Head Roll (boolean)
-True if head is significantly tilted sideways for >1.2 seconds.
-Can indicate loss of muscle tone from falling asleep, but also triggers from normal posture shifts. Treat as weak/supplementary signal only.
-
-## Voice / Audio Metrics (when available)
-During conversation, you may also receive voice metrics. These are powerful drowsiness indicators that complement the visual data.
-
-### Energy RMS (0.0–1.0)
-Speech volume/energy. Each person has a different baseline — compare to their personal baseline when available.
-Natural variation of +/- 30% from baseline is NORMAL for most people — everyone's voice fluctuates.
-- 45%+ drop from baseline = getting notably quieter, likely drowsier
-- 20-45% below baseline = possible early sign, but could be normal variation. Only flag if OTHER signals confirm.
-- Stable near baseline = normal
-
-### Speech Rate (words per minute)
-How fast the driver speaks. Drowsy people slow down.
-- 40%+ drop from baseline = notably slower, likely drowsy
-- 20-40% below baseline = some slowing, could be thinking or relaxed speech. Need corroboration.
-- Stable near baseline = normal
-
-### Pause Ratio (0.0–1.0)
-Fraction of speech that is silence. Drowsy people pause more.
-- 75%+ above baseline = significantly more hesitation
-- 30-75% above baseline = some increase, could be normal thinking pauses. Only concerning with other signals.
-- Stable near baseline = normal
-
-### Response Latency (seconds)
-How long after being asked a question the driver starts speaking.
-- 5+ seconds longer than baseline = notably slower processing
-- 2-5 seconds longer = some delay, but people naturally vary. Check other metrics.
-- Stable near baseline = normal
-
-## Voice + Visual Combined Reasoning
-The most reliable drowsiness detection comes from BOTH modalities confirming:
-- **Visual drowsy + Voice drowsy** = Very high confidence. PERCLOS elevated AND speech quieter/slower.
-- **Visual drowsy + Voice normal** = Moderate confidence. Could be just eye fatigue. Monitor closely.
-- **Visual normal + Voice drowsy** = LOW confidence. Voice alone is NOT enough to classify as drowsy. People naturally vary in how they speak — some talk quieter, slower, or with more pauses depending on context, mood, or the topic. Only flag if voice metrics are DRAMATICALLY below baseline (45%+ drop in energy, 40%+ drop in speech rate).
-- **Visual normal + Voice normal** = ALERT.
-
-Voice metrics are SUPPLEMENTARY — they strengthen visual evidence but should NEVER be the primary reason for a DROWSY classification. If eyes and head are fine, the driver is almost certainly alert regardless of voice.
-
-## Important Reasoning Guidelines
-
-1. **No single metric is conclusive.** Look for CONVERGENCE of multiple signals. Head_down and head_roll alone mean NOTHING.
-2. **Microsleep is always critical.** If microsleep=True, the answer is CRITICAL regardless of other metrics.
-3. **Context matters.** Occasional slow blinks alone might just mean dry eyes. Slow blinks + elevated PERCLOS + pitch variance = real drowsiness.
-4. **Trends matter more than snapshots.** If you see history, look for WORSENING or IMPROVING patterns. A single elevated reading could be noise. **If metrics are IMPROVING (PERCLOS falling, slow blinks decreasing), you MUST downgrade your assessment accordingly — even if the last reading was DROWSY.**
-5. **Respond to improvement.** If the previous snapshot showed PERCLOS at 0.30 but now it's at 0.08, the driver is ALERT — not still DROWSY. The CURRENT metrics matter most, not past ones.
-6. **Head signals are WEAK and unreliable.** Head down/roll produce many false positives from normal driving behavior (looking at dashboard, mirrors, phone). IGNORE head_down and head_roll unless PERCLOS > 0.20 AND slow_blinks >= 2 at the same time.
-7. **Don't be stuck.** Every evaluation is INDEPENDENT. Previous assessments should NOT anchor your current one. If metrics are clearly normal right now, say ALERT even if the last 5 evaluations said DROWSY.
-8. **PERCLOS and slow blinks are the most reliable signals.** Weight these heavily. EAR std and pitch_var are supplementary.
-9. **Alert is the default.** Unless you see clear, specific evidence of drowsiness, the answer is ALERT. Do NOT flag DROWSY just because one or two minor metrics are slightly elevated.
-
-## Response Format
-
-You MUST respond with EXACTLY this JSON format, nothing else:
-{"level": "ALERT|MILD|DROWSY|CRITICAL", "confidence": 0.0-1.0, "reasoning": "brief explanation"}
-
-Examples:
-{"level": "ALERT", "confidence": 0.92, "reasoning": "All metrics within normal range. PERCLOS 0.04, no slow blinks, stable head position."}
-{"level": "ALERT", "confidence": 0.85, "reasoning": "PERCLOS low at 0.06, 0 slow blinks, normal blink rate. Head_down=True but ignoring it as a false positive since eye metrics are clean."}
-{"level": "ALERT", "confidence": 0.88, "reasoning": "Metrics improved significantly from previous snapshot. PERCLOS dropped from 0.25 to 0.07, slow blinks from 3 to 0. Driver is recovering."}
-{"level": "MILD", "confidence": 0.65, "reasoning": "PERCLOS slightly elevated at 0.15 with 1 slow blink, but head stable and no microsleep. Early fatigue sign worth monitoring."}
-{"level": "DROWSY", "confidence": 0.81, "reasoning": "PERCLOS 0.28 with 3 slow blinks and increasing pitch variance. Multiple converging signals indicate real drowsiness."}
-{"level": "CRITICAL", "confidence": 0.98, "reasoning": "Microsleep detected — eyes closed >1.5s. Immediate intervention required."}
-{"level": "DROWSY", "confidence": 0.78, "reasoning": "PERCLOS 0.22 with voice energy at 55% of baseline and speech rate dropped 40%. Audio-visual convergence confirms drowsiness."}"""
+Respond with ONLY this JSON:
+{"level": "ALERT|MILD|DROWSY|CRITICAL", "confidence": 0.0-1.0, "reasoning": "brief explanation"}"""
 
 
 class MetricReasoner:
@@ -398,11 +312,11 @@ class MetricReasoner:
                     for d in deviations:
                         parts.append(f"  - {d}")
 
-        # Trend history (if available)
+        # Trend history (if available) — cap at last 5 to stay within context window
         if len(self._history) > 1:
             parts.append("")
-            parts.append(f"## Recent History ({len(self._history)} snapshots, ~{Config.REASONER_INTERVAL_S}s apart)")
-            recent = list(self._history)  # deque already capped at maxlen
+            recent = list(self._history)[-5:]  # Only last 5 snapshots
+            parts.append(f"## Recent History ({len(recent)} snapshots, ~{Config.REASONER_INTERVAL_S}s apart)")
             t0 = recent[0]['time']
             for snap in recent:
                 age = snap['time'] - t0
@@ -485,7 +399,7 @@ class MetricReasoner:
                 {"role": "user", "content": prompt},
             ],
             temperature=0.2,       # Slightly above minimum to avoid stuck assessments
-            max_tokens=150,        # JSON response is short
+            max_tokens=256,        # Room for JSON + reasoning text
             response_format={"type": "json_object"},
         )
 

@@ -690,8 +690,17 @@ if __name__ == "__main__":
             tts.shutdown()
         elif sys.argv[1] == "--dump-db":
             dump_database()
+        elif sys.argv[1] == "--reset-db":
+            memory = MemoryManager()
+            print(f"⚠️  This will DELETE all data in {memory.db_path}")
+            confirm = input("Type 'yes' to confirm: ").strip().lower()
+            if confirm == "yes":
+                memory.reset_database()
+            else:
+                print("Cancelled.")
+            memory.close()
         else:
             print(f"Unknown argument: {sys.argv[1]}")
-            print("Usage: python main.py [--calibrate | --dump-db]")
+            print("Usage: python main.py [--calibrate | --dump-db | --reset-db]")
     else:
         main()
