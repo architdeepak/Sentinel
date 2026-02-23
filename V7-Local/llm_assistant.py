@@ -38,7 +38,8 @@ class LLMAssistant:
             self.llm = Llama(
                 model_path=str(Config.LLM_MODEL_PATH),
                 n_ctx=Config.LLM_CONTEXT,
-                n_threads=Config.LLM_THREADS,
+                n_threads=Config.LLM_THREADS,          # 3 threads for generation (leaves 1 core free)
+                n_threads_batch=4,                      # all 4 cores for prompt eval — speeds up first token
                 n_gpu_layers=0,
                 verbose=False,
             )
@@ -252,8 +253,9 @@ This is what you know about this driver's drowsiness patterns from previous acti
 
             stream = self.llm.create_chat_completion(
                 messages=self.messages,
-                temperature=0.9,
+                temperature=0.75,       # 0.75 vs 0.9: 1B models follow instructions better; responses stay natural
                 max_tokens=Config.LLM_MAX_TOKENS,
+                repeat_penalty=1.1,     # prevent repetition — small models loop without this; saves wasted tokens
                 stream=True,
             )
 

@@ -30,8 +30,9 @@ class Config:
     VOSK_BUFFER_SIZE = 8192
 
     # ── Camera settings (RPi optimization) ──
-    CAMERA_WIDTH = 480
-    CAMERA_HEIGHT = 360
+    # Match PROC size exactly — eliminates cv2.resize copy every processed frame
+    CAMERA_WIDTH = 320
+    CAMERA_HEIGHT = 240
     CAMERA_FPS = 20
 
     # ── Processing resolution (detection runs at this size) ──

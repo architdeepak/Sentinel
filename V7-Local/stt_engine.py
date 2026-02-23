@@ -98,10 +98,8 @@ class STTEngine:
 
         try:
             for _ in range(max_iterations):
-                elapsed = time.perf_counter() - t_start
-                if elapsed > timeout:
-                    break
-
+                # stream.read() blocks ~512ms per call (8192 samples @ 16kHz)
+                # max_iterations already caps total time to `timeout` seconds
                 data = self.stream.read(
                     Config.VOSK_BUFFER_SIZE,
                     exception_on_overflow=False,
