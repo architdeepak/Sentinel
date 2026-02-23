@@ -51,7 +51,7 @@ class Config:
     DROWSY_THRESHOLD = 0.55  # Used only for DetectionThread overlay label
 
     # ── Conversation settings ──
-    MAX_HISTORY_TURNS = 4    # Small model: 4 turn-pairs = ~400 tokens of history
+    MAX_HISTORY_TURNS = 8    # 8 turn-pairs ≈ 1400 tokens; fits in 4096 context with room to spare
     MAX_CONVERSATION_TURNS = 15
 
     # ── Parallel detection during conversation ──
