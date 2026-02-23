@@ -18,7 +18,7 @@ import numpy as np
 
 
 # ── Layout constants ──
-_W, _H = 480, 520
+_W, _H = 480, 550
 _BG = (20, 20, 20)
 _FONT = cv2.FONT_HERSHEY_SIMPLEX
 _WHITE = (220, 220, 220)
@@ -163,7 +163,26 @@ class DashboardRenderer:
         hd_color = _RED if hd else _GREEN
         cv2.putText(img, f"Microsleep: {ms}", (10, y), _FONT, 0.45, ms_color, 1)
         cv2.putText(img, f"Head Down: {hd}", (240, y), _FONT, 0.45, hd_color, 1)
-        y += 28
+        y += 24
+
+        # Alert duration (sustained recovery timer)
+        alert_dur = det.get('alert_duration', 0)
+        if alert_dur > 0:
+            mins = int(alert_dur // 60)
+            secs = int(alert_dur % 60)
+            dur_str = f"{mins}:{secs:02d}" if mins else f"{secs}s"
+            cv2.putText(img, f"Alert for: {dur_str}", (10, y),
+                        _FONT, 0.5, _GREEN, 1)
+            # Progress bar toward auto-recovery threshold
+            from config import Config
+            progress = min(alert_dur / Config.ALERT_RECOVERY_SECS, 1.0)
+            _bar(img, 220, y - 12, 200, 14, progress, 1.0, _GREEN)
+            if progress >= 1.0:
+                cv2.putText(img, "RECOVERED", (430, y), _FONT, 0.4, _GREEN, 1)
+        else:
+            cv2.putText(img, "Alert for: --", (10, y),
+                        _FONT, 0.5, _GRAY, 1)
+        y += 24
 
         self._prev_det = det
 

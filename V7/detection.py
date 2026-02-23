@@ -99,15 +99,24 @@ def process_mouth_metrics(landmarks, state, now):
 
 def process_head_pitch(landmarks, state, now):
     """Process head pitch (downward tilt) detection."""
+    # Robust pitch: compare chin-to-nose and forehead-to-nose vertical distances
     nose_y = landmarks[NOSE_TIP][1]
-    eye_mid_y = (landmarks[LEFT_EYE_CORNER][1] + landmarks[RIGHT_EYE_CORNER][1]) / 2
-    face_height = abs(landmarks[FOREHEAD][1] - landmarks[CHIN][1])
+    chin_y = landmarks[CHIN][1]
+    forehead_y = landmarks[FOREHEAD][1]
 
-    pitch = (nose_y - eye_mid_y) / face_height
-    state['pitch_window'].append((now, pitch))
+    face_height = abs(forehead_y - chin_y)
+    if face_height < 10:  # sanity check, skip if face not detected
+        state['head_down_start'] = None
+        return False
+
+    chin_to_nose = chin_y - nose_y
+    forehead_to_nose = nose_y - forehead_y
+    # Ratio: if chin is much lower than nose compared to forehead, head is down
+    pitch_ratio = chin_to_nose / face_height
+    state['pitch_window'].append((now, pitch_ratio))
 
     head_down = False
-    if pitch > Config.HEAD_DOWN_THRESH:
+    if pitch_ratio > Config.HEAD_DOWN_THRESH:
         if state['head_down_start'] is None:
             state['head_down_start'] = now
         elif now - state['head_down_start'] > Config.HEAD_DOWN_TIME:
@@ -281,6 +290,11 @@ class DetectionThread:
         }
         self._microsleep = False
         self._head_down = False
+        self._head_roll = False
+
+        # Alert duration tracking
+        self._alert_since = None      # time.time() when score first dropped below threshold
+        self._alert_duration = 0.0    # seconds of sustained alertness
 
         # Shared display frames (main thread reads these for imshow)
         self._frame_lock = threading.Lock()
@@ -327,11 +341,13 @@ class DetectionThread:
         print("🔍 Background detection thread stopped")
 
     def get_full_state(self):
-        """Return metrics + microsleep/head_down flags (thread-safe)."""
+        """Return metrics + microsleep/head_down flags + alert duration (thread-safe)."""
         with self._lock:
             m = self._latest_metrics.copy()
             m['microsleep'] = self._microsleep
             m['head_down'] = self._head_down
+            m['head_roll'] = self._head_roll
+            m['alert_duration'] = self._alert_duration
             return m
 
     def get_display_frames(self):
@@ -379,17 +395,24 @@ class DetectionThread:
 
         state = self._init_state()
         frame_count = 0
+        consecutive_failures = 0
         frame_skip = Config.DETECTION_FRAME_SKIP
-        # Landmarks are normalized to the processed frame size (320x240),
+        # Landmarks are normalized to the processed frame size,
         # NOT the capture resolution — must scale to processed dimensions.
-        PROC_W, PROC_H = 320, 240
+        PROC_W, PROC_H = Config.PROC_WIDTH, Config.PROC_HEIGHT
 
         try:
             while self._running and cap.isOpened():
                 ret, frame = cap.read()
                 if not ret:
+                    consecutive_failures += 1
+                    if consecutive_failures > 50:
+                        print("⚠️ DetectionThread: too many consecutive read failures — stopping")
+                        self._running = False
+                        break
                     time.sleep(0.05)
                     continue
+                consecutive_failures = 0
 
                 frame_count += 1
                 if frame_count % frame_skip != 0:
@@ -421,11 +444,22 @@ class DetectionThread:
                 cleanup_windows(state, now)
                 metrics = calculate_metrics(state, microsleep, head_down, head_roll)
 
+                # Update alert duration tracker
+                if metrics['drowsy_score'] < Config.DROWSY_THRESHOLD and not microsleep:
+                    if self._alert_since is None:
+                        self._alert_since = now
+                    alert_dur = now - self._alert_since
+                else:
+                    self._alert_since = None
+                    alert_dur = 0.0
+
                 # Update shared metrics (only thing accessed cross-thread)
                 with self._lock:
                     self._latest_metrics = metrics
                     self._microsleep = microsleep
                     self._head_down = head_down
+                    self._head_roll = head_roll
+                    self._alert_duration = alert_dur
 
                 # Render overlay onto frame and store in shared buffer
                 drowsy_state = "DROWSY" if metrics['drowsy_score'] > Config.DROWSY_THRESHOLD else "ALERT"
@@ -483,5 +517,6 @@ def format_detection_for_llm(metrics, microsleep=False, head_down=False):
         f"pitch_var={metrics.get('pitch_var', 0):.5f}",
         f"microsleep={microsleep}",
         f"head_down={head_down}",
+        f"alert_duration={metrics.get('alert_duration', 0):.0f}s",
     ]
     return "DETECTION: " + ", ".join(parts)

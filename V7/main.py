@@ -19,6 +19,7 @@ Usage:
 
 import cv2
 import mediapipe as mp
+import signal
 import time
 import threading
 from collections import deque
@@ -98,7 +99,7 @@ def run_ear_calibration(cap, face_mesh, duration=5.0):
     if calibration fails (e.g. face not detected).
     """
     print(f"\n👁️  EAR Calibration — look at the camera with eyes open for {duration:.0f}s...")
-    PROC_W, PROC_H = 320, 240
+    PROC_W, PROC_H = Config.PROC_WIDTH, Config.PROC_HEIGHT
     ear_samples = []
     start = time.time()
 
@@ -217,10 +218,10 @@ def run_detection_loop(cap, face_mesh, state, reasoner, ear_thresh=None):
       3. Reasoner confirms DROWSY/CRITICAL N consecutive times → trigger
       4. Microsleep bypass: instant trigger (too critical for API latency)
     """
-    frame_skip = 2
+    frame_skip = Config.DETECTION_FRAME_SKIP
     frame_count = 0
     final_metrics = None
-    PROC_W, PROC_H = 320, 240
+    PROC_W, PROC_H = Config.PROC_WIDTH, Config.PROC_HEIGHT
 
     while cap.isOpened():
         ret, frame = cap.read()
@@ -337,6 +338,8 @@ def run_llm_conversation(tts, stt, llm_assistant, metrics, state,
     # Track detection scores for session averages
     score_accumulator = []
     voice_accumulator = []
+    perclos_accumulator = []
+    slow_blinks_accumulator = []
 
     # Get baselines for voice comparison
     baselines = memory_manager.get_baselines()
@@ -361,11 +364,15 @@ def run_llm_conversation(tts, stt, llm_assistant, metrics, state,
     if reasoner is not None:
         reasoner_context = reasoner.get_reasoning_for_llm()
 
+    # Get driver drowsiness history for LLM personalization
+    driver_history = memory_manager.get_driver_history_for_llm()
+
     # Start conversation with raw metrics + baselines + 8B analysis + session history
     session_count = memory_manager.get_session_count() - 1  # -1 because we just started this one
     llm_assistant.start_conversation(
         detection_context, baselines_str, max(0, session_count),
         reasoner_context=reasoner_context,
+        driver_history=driver_history,
     )
 
     # ── Conversation worker (runs in background thread) ──
@@ -403,6 +410,10 @@ def run_llm_conversation(tts, stt, llm_assistant, metrics, state,
             )
             score_accumulator.append(det_state.get('drowsy_score', 0))
 
+            # Track peak vision metrics for session analytics
+            perclos_accumulator.append(det_state.get('perclos', 0))
+            slow_blinks_accumulator.append(det_state.get('slow_blinks', 0))
+
             # Feed voice features into the 8B reasoner for combined reasoning
             if (latest_voice_features and reasoner is not None
                     and reasoner.should_call()):
@@ -425,6 +436,22 @@ def run_llm_conversation(tts, stt, llm_assistant, metrics, state,
 
         hard_exit = {'exit', 'quit', 'bye', 'goodbye', 'bye bye', 'stop talking'}
 
+        def _check_alert_recovery():
+            """Check if driver has been alert long enough to auto-end."""
+            det = detection_thread.get_full_state()
+            dur = det.get('alert_duration', 0)
+            if dur >= Config.ALERT_RECOVERY_SECS:
+                mins = int(dur // 60)
+                secs = int(dur % 60)
+                print(f"\n🟢 Driver alert for {mins}m{secs}s — auto-ending conversation")
+                tts.speak(
+                    "Hey, you've been looking sharp for a while now! "
+                    "I'm going to hop off, but I'll keep watching. Stay safe!"
+                )
+                tts.wait_until_done()
+                return True
+            return False
+
         for turn in range(max_turns):
             user_input, audio_data = stt.listen(timeout=20, show_diagnostics=False)
 
@@ -438,6 +465,8 @@ def run_llm_conversation(tts, stt, llm_assistant, metrics, state,
                 response = _handle_user_turn(user_input, audio_data)
                 if response and "[RECOVERED]" in response:
                     print("🟢 LLM determined driver has recovered")
+                    break
+                if _check_alert_recovery():
                     break
             else:
                 print("⚠️  No response detected")
@@ -454,6 +483,8 @@ def run_llm_conversation(tts, stt, llm_assistant, metrics, state,
                 response = _handle_user_turn(retry_input, retry_audio)
                 if response and "[RECOVERED]" in response:
                     print("🟢 LLM determined driver has recovered")
+                    break
+                if _check_alert_recovery():
                     break
 
         conversation_done.set()
@@ -489,6 +520,32 @@ def run_llm_conversation(tts, stt, llm_assistant, metrics, state,
     avg_score = sum(score_accumulator) / len(score_accumulator) if score_accumulator else 0
     max_score = max(score_accumulator) if score_accumulator else 0
 
+    # Compute richer session analytics
+    peak_perclos = max(perclos_accumulator) if perclos_accumulator else None
+    peak_slow = max(slow_blinks_accumulator) if slow_blinks_accumulator else None
+
+    # Voice averages for the session
+    avg_rms = avg_rate = avg_lat = None
+    if voice_accumulator:
+        rms_vals = [v['energy_rms'] for v in voice_accumulator if v.get('energy_rms') is not None]
+        rate_vals = [v['speech_rate_wpm'] for v in voice_accumulator if v.get('speech_rate_wpm') is not None]
+        lat_vals = [v['response_latency_s'] for v in voice_accumulator if v.get('response_latency_s') is not None]
+        if rms_vals:
+            avg_rms = round(sum(rms_vals) / len(rms_vals), 4)
+        if rate_vals:
+            avg_rate = round(sum(rate_vals) / len(rate_vals), 1)
+        if lat_vals:
+            avg_lat = round(sum(lat_vals) / len(lat_vals), 1)
+
+    # Recovery time = alert_duration at conversation end (0 if never recovered)
+    final_det = detection_thread.get_full_state()
+    recovery_time = final_det.get('alert_duration', 0)
+
+    # Determine what triggered the conversation
+    trigger_reason = "camera"
+    if metrics.get('microsleep', False):
+        trigger_reason = "microsleep"
+
     # End session in SQLite
     memory_manager.end_session(
         session_id,
@@ -496,6 +553,13 @@ def run_llm_conversation(tts, stt, llm_assistant, metrics, state,
         max_drowsy_score=round(max_score, 3),
         turn_count=llm_assistant.conversation_turns,
         duration_s=round(session_duration, 1),
+        recovery_time_s=round(recovery_time, 1) if recovery_time else None,
+        peak_perclos=round(peak_perclos, 4) if peak_perclos is not None else None,
+        peak_slow_blinks=peak_slow,
+        avg_energy_rms=avg_rms,
+        avg_speech_rate=avg_rate,
+        avg_response_latency=avg_lat,
+        trigger_reason=trigger_reason,
     )
 
     # LLM-based fact extraction (8B model — cheap)
@@ -539,6 +603,19 @@ def run_llm_conversation(tts, stt, llm_assistant, metrics, state,
 # =========================
 def main():
     """Main function — V7 drowsiness detection with LLM reasoning + SQLite memory."""
+    # ── Validate API keys early ──
+    if not Config.GROQ_API_KEY:
+        print("❌ GROQ_API_KEY not set. Add it to your .env file.")
+        return
+    if not Config.DEEPGRAM_API_KEY:
+        print("❌ DEEPGRAM_API_KEY not set. Add it to your .env file.")
+        return
+
+    # ── Graceful shutdown on SIGTERM (e.g. systemd stop) ──
+    def _sigterm_handler(signum, frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, _sigterm_handler)
+
     print("\n" + "=" * 60)
     print("🚗 Driver Drowsiness Detection System V7")
     print("   LLM as reasoning layer | SQLite memory")
@@ -672,6 +749,7 @@ def dump_database():
     """Utility: print all SQLite data."""
     memory_manager = MemoryManager()
     memory_manager.dump_all()
+    memory_manager.close()
 
 
 # Add command line argument handling
@@ -688,6 +766,7 @@ if __name__ == "__main__":
             run_calibration(stt, ve, memory)
             stt.cleanup()
             tts.shutdown()
+            memory.close()
         elif sys.argv[1] == "--dump-db":
             dump_database()
         elif sys.argv[1] == "--reset-db":

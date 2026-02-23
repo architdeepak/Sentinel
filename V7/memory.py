@@ -56,7 +56,14 @@ class MemoryManager:
                     avg_drowsy_score REAL,
                     max_drowsy_score REAL,
                     turn_count INTEGER DEFAULT 0,
-                    duration_s REAL
+                    duration_s REAL,
+                    recovery_time_s REAL,
+                    peak_perclos REAL,
+                    peak_slow_blinks INTEGER,
+                    avg_energy_rms REAL,
+                    avg_speech_rate REAL,
+                    avg_response_latency REAL,
+                    trigger_reason TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS baselines (
@@ -140,19 +147,28 @@ class MemoryManager:
         return session_id
 
     def end_session(self, session_id, avg_drowsy_score=None, max_drowsy_score=None,
-                    turn_count=0, duration_s=None):
+                    turn_count=0, duration_s=None, recovery_time_s=None,
+                    peak_perclos=None, peak_slow_blinks=None,
+                    avg_energy_rms=None, avg_speech_rate=None,
+                    avg_response_latency=None, trigger_reason=None):
         """Finalize a session with aggregate stats."""
         now = datetime.now().isoformat()
         with self._connect() as conn:
             conn.execute("""
                 UPDATE sessions
                 SET ended_at=?, avg_drowsy_score=?, max_drowsy_score=?,
-                    turn_count=?, duration_s=?
+                    turn_count=?, duration_s=?, recovery_time_s=?,
+                    peak_perclos=?, peak_slow_blinks=?,
+                    avg_energy_rms=?, avg_speech_rate=?,
+                    avg_response_latency=?, trigger_reason=?
                 WHERE id=?
             """, (now, avg_drowsy_score, max_drowsy_score, turn_count,
-                  duration_s, session_id))
+                  duration_s, recovery_time_s, peak_perclos, peak_slow_blinks,
+                  avg_energy_rms, avg_speech_rate, avg_response_latency,
+                  trigger_reason, session_id))
         print(f"📝 Session {session_id} ended (turns={turn_count}, "
-              f"avg_score={avg_drowsy_score:.2f})" if avg_drowsy_score else "")
+              f"avg_score={avg_drowsy_score:.2f})" if avg_drowsy_score is not None else 
+              f"📝 Session {session_id} ended (turns={turn_count})")
 
     def get_session_count(self):
         """Return total number of completed sessions."""
@@ -168,6 +184,115 @@ class MemoryManager:
                 "ORDER BY id DESC LIMIT 1"
             ).fetchone()
             return row[0] if row else None
+
+    def get_driver_history_for_llm(self):
+        """Build a rich driver history summary from past sessions for LLM context.
+
+        Returns a formatted string covering:
+          - Session frequency and patterns
+          - Average/worst drowsiness metrics across sessions
+          - Typical recovery times
+          - Voice metric trends
+          - Time-of-day patterns
+        """
+        with self._connect() as conn:
+            sessions = conn.execute("""
+                SELECT started_at, ended_at, avg_drowsy_score, max_drowsy_score,
+                       turn_count, duration_s, recovery_time_s,
+                       peak_perclos, peak_slow_blinks,
+                       avg_energy_rms, avg_speech_rate, avg_response_latency,
+                       trigger_reason
+                FROM sessions WHERE ended_at IS NOT NULL
+                ORDER BY id DESC LIMIT 20
+            """).fetchall()
+
+        if not sessions:
+            return ""
+
+        total = len(sessions)
+
+        # Aggregate stats
+        avg_scores = [s[2] for s in sessions if s[2] is not None]
+        max_scores = [s[3] for s in sessions if s[3] is not None]
+        durations = [s[5] for s in sessions if s[5] is not None]
+        recovery_times = [s[6] for s in sessions if s[6] is not None]
+        peak_perclos = [s[7] for s in sessions if s[7] is not None]
+        peak_slow = [s[8] for s in sessions if s[8] is not None]
+        avg_rms = [s[9] for s in sessions if s[9] is not None]
+        avg_rate = [s[10] for s in sessions if s[10] is not None]
+        avg_lat = [s[11] for s in sessions if s[11] is not None]
+        triggers = [s[12] for s in sessions if s[12] is not None]
+
+        lines = []
+        lines.append(f"Total activations: {total}")
+
+        # Time-of-day patterns
+        hours = []
+        for s in sessions:
+            try:
+                h = int(s[0][11:13])  # Extract hour from ISO timestamp
+                hours.append(h)
+            except (ValueError, IndexError):
+                pass
+        if hours:
+            from collections import Counter
+            hour_counts = Counter(hours)
+            common_hours = hour_counts.most_common(3)
+            time_strs = []
+            for h, c in common_hours:
+                period = "morning" if 5 <= h < 12 else "afternoon" if 12 <= h < 17 else "evening" if 17 <= h < 21 else "night"
+                time_strs.append(f"{h}:00 ({period}, {c}x)")
+            lines.append(f"Most common times: {', '.join(time_strs)}")
+
+        # Drowsiness severity
+        if avg_scores:
+            lines.append(f"Avg drowsy score across sessions: {sum(avg_scores)/len(avg_scores):.3f}")
+        if max_scores:
+            lines.append(f"Worst peak score ever: {max(max_scores):.3f}")
+        if peak_perclos:
+            lines.append(f"Worst PERCLOS ever: {max(peak_perclos):.3f}")
+        if peak_slow:
+            lines.append(f"Worst slow blinks in a session: {max(peak_slow)}")
+
+        # Recovery patterns
+        if recovery_times:
+            avg_rec = sum(recovery_times) / len(recovery_times)
+            fastest = min(recovery_times)
+            lines.append(f"Avg recovery time: {avg_rec:.0f}s (fastest: {fastest:.0f}s)")
+        if durations:
+            avg_dur = sum(durations) / len(durations)
+            lines.append(f"Avg conversation duration: {avg_dur:.0f}s")
+
+        # Voice patterns across sessions
+        voice_parts = []
+        if avg_rms:
+            voice_parts.append(f"avg energy={sum(avg_rms)/len(avg_rms):.4f}")
+        if avg_rate:
+            voice_parts.append(f"avg speech rate={sum(avg_rate)/len(avg_rate):.0f}wpm")
+        if avg_lat:
+            voice_parts.append(f"avg response latency={sum(avg_lat)/len(avg_lat):.1f}s")
+        if voice_parts:
+            lines.append(f"Voice across sessions: {', '.join(voice_parts)}")
+
+        # Trigger reasons
+        if triggers:
+            from collections import Counter
+            trigger_counts = Counter(triggers)
+            parts = [f"{reason}: {count}x" for reason, count in trigger_counts.most_common()]
+            lines.append(f"Trigger reasons: {', '.join(parts)}")
+
+        # Recent session summaries (last 3)
+        lines.append("")
+        lines.append("Recent sessions:")
+        for i, s in enumerate(sessions[:3]):
+            started = s[0][:16].replace("T", " ") if s[0] else "?"
+            score_str = f"avg_score={s[2]:.3f}" if s[2] is not None else ""
+            dur_str = f"duration={s[5]:.0f}s" if s[5] is not None else ""
+            rec_str = f"recovery={s[6]:.0f}s" if s[6] is not None else ""
+            parts = [p for p in [score_str, dur_str, rec_str] if p]
+            lines.append(f"  {started}: {', '.join(parts)}")
+
+        return "\n".join(lines)
 
     # ═══════════════════════════════════════════════════════════
     #  Baselines
@@ -737,6 +862,8 @@ Example:
 
             count = 0
             for fact in facts:
+                if not isinstance(fact, dict):
+                    continue
                 ft = fact.get("type", "").strip()
                 val = fact.get("value", "").strip()
                 if ft and val:

@@ -41,7 +41,8 @@ class LLMAssistant:
             self.client = None
 
     def start_conversation(self, detection_context, voice_baselines_str,
-                           session_count=0, reasoner_context=""):
+                           session_count=0, reasoner_context="",
+                           driver_history=""):
         """Start a new conversation with raw detection context and driver profile.
 
         Args:
@@ -81,6 +82,15 @@ An 8B reasoning model analyzed the driver's metrics before this conversation sta
 Use this as an initial calibration for urgency — but continue monitoring the raw metrics yourself each turn.
 """
 
+        # Build driver history section
+        history_section = ""
+        if driver_history:
+            history_section = f"""
+## Driver Drowsiness History (from past sessions)
+This is what you know about this driver's drowsiness patterns from previous activations. Use this to personalize your approach — if they recover fast, be encouraging. If they get drowsy at the same time every day, mention it. If their voice always drops when drowsy, watch for that.
+{driver_history}
+"""
+
         system_prompt = f"""You are Sentinel, an AI safety companion in a car. Your ONLY job is to help drowsy drivers regain alertness through engaging conversation. You were just activated because the driver crossed the drowsiness threshold.
 
 ## Session Context
@@ -88,7 +98,7 @@ Use this as an initial calibration for urgency — but continue monitoring the r
 
 ## Driver Profile
 {profile_summary}
-
+{history_section}
 ## Initial Detection State (Raw Sensor Data)
 {detection_context}
 {reasoner_section}
@@ -108,6 +118,7 @@ Each turn you'll receive raw sensor data. Here's what each metric means and how 
 - **pitch_var**: Head pitch (vertical tilt) variance. High = head nodding. Near-zero = stable head position.
 - **microsleep**: True if eyes have been closed continuously for >1.5 seconds. This is CRITICAL — if True, they may be falling asleep.
 - **head_down**: True if head has been tilted downward for an extended period. Sign of nodding off.
+- **alert_duration**: Seconds the driver has been continuously alert (score below threshold, no microsleep). When this reaches 90s, the system will auto-end the conversation. If it's climbing, the driver is recovering well — acknowledge it!
 
 ### Voice Metrics (Audio-Based)
 - **energy_rms** (0.0–1.0): Speech volume/energy. Each driver's normal is different — compare to their baseline.
@@ -314,6 +325,10 @@ If the driver claims "I'm fine" but metrics disagree → keep going gently.
 
         except Exception as e:
             print(f"\n⚠️ API error: {e}")
-            return "Sorry, I'm having trouble connecting right now."
+            fallback = "Sorry, I'm having trouble connecting right now."
+            # Keep message history consistent — we already appended the user msg
+            self.messages.append({"role": "assistant", "content": fallback})
+            self.memory_manager.add_to_transcript("assistant", fallback)
+            return fallback
 
 

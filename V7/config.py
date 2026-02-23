@@ -37,6 +37,10 @@ class Config:
     CAMERA_HEIGHT = 360
     CAMERA_FPS = 20
 
+    # ── Processing resolution (detection runs at this size) ──
+    PROC_WIDTH = 320
+    PROC_HEIGHT = 240
+
     # ── Detection thresholds (trigger only — LLM reasons about severity) ──
     EAR_THRESH = 0.20          # Default fallback; overridden by EAR calibration at startup
     MAR_THRESH = 0.6
@@ -63,6 +67,9 @@ class Config:
     REASONER_INTERVAL_S = 3.0        # Min seconds between 8B API calls
     REASONER_CONFIRM_COUNT = 3       # Consecutive DROWSY/CRITICAL before triggering
     REASONER_HISTORY_SIZE = 10       # Rolling history snapshots for trend analysis
+
+    # ── Auto-recovery (end conversation when driver is alert) ──
+    ALERT_RECOVERY_SECS = 90   # Seconds of sustained alert before auto-ending conversation
 
     # ── Calibration ──
     CALIBRATION_SENTENCES = 5  # Number of sentences for voice baseline calibration

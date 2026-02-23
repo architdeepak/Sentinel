@@ -60,6 +60,7 @@ class TTSEngine:
         while True:
             text = self.audio_queue.get()
             if text is None:
+                self.audio_queue.task_done()
                 break
 
             self.is_speaking = True
@@ -91,7 +92,7 @@ class TTSEngine:
                                 self.metrics_logger.log_tts_first_audio()
 
                 proc.stdin.close()
-                proc.wait()
+                proc.wait(timeout=30)
 
                 total_ms = (time.perf_counter() - t_start) * 1000
 
@@ -126,7 +127,7 @@ class TTSEngine:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
-            except FileNotFoundError:
+            except (FileNotFoundError, OSError):
                 continue
         print("⚠️ No audio player found (mpg123/ffplay)")
         return None
