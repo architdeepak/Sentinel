@@ -18,6 +18,7 @@ Usage:
 """
 
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -92,6 +93,10 @@ def run_calibration(num_sentences=5, reset=False):
         print(f"\n  [{i+1}/{num_sentences}] Phrase:")
         print(f'  >>> "{prompt}"')
 
+        # Brief pause so ALSA fully releases the mic before TTS grabs the output device
+        # (on RPi, rapidly switching between input/output on the same hardware causes silence)
+        time.sleep(0.4)
+
         # Speak the phrase so the driver knows exactly what to say
         tts.speak(prompt)
         tts.wait_until_done()
@@ -99,6 +104,7 @@ def run_calibration(num_sentences=5, reset=False):
         print("  🎤 Your turn — repeat that phrase now...")
         extractor.mark_prompt_end()
         text, audio = stt.listen(timeout=15, show_diagnostics=False)
+        time.sleep(0.3)  # Let ALSA release the mic stream before next TTS
 
         if audio is not None:
             features = extractor.extract_features(audio, text)
