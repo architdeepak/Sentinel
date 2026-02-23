@@ -28,6 +28,7 @@ class LLMAssistant:
         self.conversation_turns = 0
         self.metrics_logger = None
         self._session_id = None  # Set by main.py after start_session()
+        self._covered_topics = []  # Tracks questions/topics used this session
         self._initialize()
 
     def _initialize(self):
@@ -52,6 +53,7 @@ class LLMAssistant:
             reasoner_context: string from MetricReasoner.get_reasoning_for_llm() — 8B analysis
         """
         self.conversation_turns = 0
+        self._covered_topics = []
 
         # Get driver profile from SQLite facts
         profile_summary = self.memory_manager.get_profile_summary()
@@ -128,17 +130,19 @@ Each turn you'll receive raw sensor data. Here's what each metric means and how 
 - **peak_amp**: Maximum amplitude. Very low peak with low RMS confirms quiet speech, not just a quiet passage.
 
 ### Using Personal Baselines
-When baseline data is available, you'll see comparisons like "67% of normal" or "+0.20 vs baseline". USE THESE for reasoning — but be LENIENT. Natural voice variation is large:
-- A 45%+ drop in energy_rms from baseline = significantly quieter than THEIR normal
-- A 40%+ drop in speech_rate from baseline = notably slower than THEIR normal
-- A 75%+ increase in pause_ratio above baseline = significantly more pauses than THEIR normal
-- 5+ seconds more response_latency than baseline = notably slower to respond than THEIR normal
+When baseline data is available, you'll see comparisons like "67% of normal" or "+0.20 vs baseline". USE THESE for reasoning — but be VERY LENIENT. Natural voice variation is enormous. Mic distance, road noise, what they're talking about — all affect every metric significantly.
 
-**Smaller deviations (10-30%) are NORMAL variation** — people speak differently depending on what they're saying, their mood, the topic, etc. Do NOT flag small voice deviations as drowsiness unless MULTIPLE visual signals also confirm it.
+Only treat voice metrics as a real signal when the deviation is substantial AND sustained across multiple turns:
+- A **60%+ drop** in energy_rms from baseline = noticeably quieter than their norm (below 60% = likely just natural variation or mic angle)
+- A **55%+ drop** in speech_rate from baseline = notably slower speech (below 55% = could just be a thoughtful answer)
+- A **100%+ increase** in pause_ratio above baseline = significantly more hesitation (smaller increases are completely normal)
+- **8+ seconds more** response_latency than baseline = genuinely slow to respond (smaller differences are noise)
 
-**ALWAYS prefer deviation from baseline over absolute numbers.** What's "quiet" for one person is "normal" for another.
+**Deviations under 40% in any metric should be IGNORED for drowsiness purposes.** This is normal human variation. Do NOT mention voice metrics to the driver unless 2+ metrics simultaneously show large, consistent changes across multiple turns.
 
-If no baselines exist yet, use the raw values with more caution — you don't know what's normal for this driver yet.
+**ALWAYS prefer deviation from baseline over absolute numbers.** What's "quiet" for one person is loud for another.
+
+If no baselines exist yet, ignore voice metrics entirely for drowsiness assessment — you have no reference point for this driver.
 
 ## Your Mission
 You are Sentinel, an AI safety companion. Your job is to keep this driver alert through genuinely engaging, deeply personalized conversation. Fighting drowsiness through real connection is more effective than any checklist. Use the metrics to calibrate urgency — but remember that a compelling conversation IS the intervention.
@@ -270,6 +274,13 @@ When metrics confirm recovery, ask warmly if they want to keep talking — some 
             if voice_context:
                 enriched_parts.append(f"[{voice_context}]")
 
+            # Inject covered-topics tracker so LLM never revisits them
+            if self._covered_topics:
+                covered_str = " | ".join(self._covered_topics[-10:])
+                enriched_parts.append(
+                    f"[ALREADY COVERED THIS SESSION — do NOT revisit or rephrase any of these: {covered_str}]"
+                )
+
             enriched_parts.append(user_message)
             enriched_message = "\n".join(enriched_parts)
 
@@ -319,6 +330,17 @@ When metrics confirm recovery, ask warmly if they want to keep talking — some 
             tts_text = full_response.strip().replace("[RECOVERED]", "").strip()
             if tts_text:
                 self.tts.speak(tts_text)
+
+            # Track the question asked this turn so we never revisit it
+            # Extract the last sentence that ends with '?' (the question asked)
+            sentences = [s.strip() for s in full_response.replace("?", "?.").split(".") if s.strip()]
+            questions = [s for s in sentences if s.endswith("?")]
+            if questions:
+                # Store a condensed version (first 8 words) as the topic tag
+                q = questions[-1]
+                tag = " ".join(q.split()[:8]).rstrip("?")
+                if tag:
+                    self._covered_topics.append(tag)
 
             full_latency_ms = (time.perf_counter() - t_api_start) * 1000
             if self.metrics_logger:

@@ -94,7 +94,7 @@ class VoiceFeatureExtractor:
             if n_complete > 0:
                 frames = samples[:n_complete].reshape(-1, frame_size)
                 frame_rms = np.sqrt(np.mean(frames ** 2, axis=1))
-                pause_ratio = float(np.mean(frame_rms < 0.015))
+                pause_ratio = float(np.mean(frame_rms < 0.030))  # Raised from 0.015 — mic noise floor is ~0.01-0.02
             else:
                 pause_ratio = 0.0
 

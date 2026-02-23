@@ -47,7 +47,10 @@ _DROWSY_COLOR = (0, 0, 255)
 def eye_aspect_ratio(landmarks, idx):
     """Calculate Eye Aspect Ratio (EAR)."""
     p1, p2, p3, p4, p5, p6 = [landmarks[i] for i in idx]
-    return (math.dist(p2, p6) + math.dist(p3, p5)) / (2.0 * math.dist(p1, p4))
+    denom = 2.0 * math.dist(p1, p4)
+    if denom < 1e-6:
+        return 0.25  # Fallback: open-eye value; avoids ZeroDivisionError on bad landmarks
+    return (math.dist(p2, p6) + math.dist(p3, p5)) / denom
 
 
 def mouth_aspect_ratio(landmarks):
@@ -99,33 +102,56 @@ def process_mouth_metrics(landmarks, state, now):
 
 
 def process_head_pitch(landmarks, state, now):
-    """Process head pitch (downward tilt) detection."""
-    # Robust pitch: compare chin-to-nose and forehead-to-nose vertical distances
+    """Detect head-drop using a self-calibrating upper-face-fraction baseline.
+
+    Metric: upper_ratio = (nose_y - forehead_y) / face_height
+      - This is the fraction of face height above the nose.
+      - When the head drops forward (camera below → more forehead shows),
+        upper_ratio INCREASES above its neutral driving value.
+      - Works regardless of camera angle because we calibrate the neutral
+        from the driver's first few seconds of sitting normally.
+    """
     nose_y = landmarks[NOSE_TIP][1]
     chin_y = landmarks[CHIN][1]
     forehead_y = landmarks[FOREHEAD][1]
 
     face_height = abs(forehead_y - chin_y)
-    if face_height < 10:  # sanity check, skip if face not detected
+    if face_height < 10:
         state['head_down_start'] = None
         return False
 
-    chin_to_nose = chin_y - nose_y
-    forehead_to_nose = nose_y - forehead_y
-    # Ratio: if chin is much lower than nose compared to forehead, head is down
-    pitch_ratio = chin_to_nose / face_height
-    state['pitch_window'].append((now, pitch_ratio))
+    # Upper-face fraction: grows when head drops (more forehead visible from below)
+    upper_ratio = (nose_y - forehead_y) / face_height
+    state['pitch_window'].append((now, upper_ratio))
 
-    head_down = False
-    if pitch_ratio > Config.HEAD_DOWN_THRESH:
+    # ── Self-calibration ──
+    # Accumulate samples until we have a stable neutral baseline.
+    calib = state.setdefault('_pitch_calib', [])
+    pitch_baseline = state.get('_pitch_baseline')
+
+    if pitch_baseline is None:
+        calib.append(upper_ratio)
+        if len(calib) >= 30:  # ~3s at 10fps
+            state['_pitch_baseline'] = float(np.median(calib))
+        # Not enough data yet — don't trigger
+        state['head_down_start'] = None
+        return False
+
+    # ── Detection: sustained deviation above neutral ──
+    # Threshold: upper_ratio must exceed baseline by > 0.10 (10% of face height)
+    # and be sustained for HEAD_DOWN_TIME seconds to avoid transient nods.
+    deviation = upper_ratio - pitch_baseline
+    head_dropping = deviation > 0.10
+
+    if head_dropping:
         if state['head_down_start'] is None:
             state['head_down_start'] = now
         elif now - state['head_down_start'] > Config.HEAD_DOWN_TIME:
-            head_down = True
+            return True
     else:
         state['head_down_start'] = None
 
-    return head_down
+    return False
 
 
 def process_head_roll(landmarks, state, now):
@@ -511,6 +537,7 @@ def format_detection_for_llm(metrics, microsleep=False, head_down=False):
         Single-line string like:
         "DETECTION: score=0.62, perclos=0.18, blinks=4, slow_blinks=2, ..."
     """
+    alert_dur = metrics.get('alert_duration', 0)
     parts = [
         f"score={metrics.get('drowsy_score', 0):.3f}",
         f"perclos={metrics.get('perclos', 0):.3f}",
@@ -520,6 +547,17 @@ def format_detection_for_llm(metrics, microsleep=False, head_down=False):
         f"pitch_var={metrics.get('pitch_var', 0):.5f}",
         f"microsleep={microsleep}",
         f"head_down={head_down}",
-        f"alert_duration={metrics.get('alert_duration', 0):.0f}s",
+        f"alert_duration={alert_dur:.0f}s",
     ]
+
+    # Add a plain-English alert flag so the LLM notices recovery trends
+    if alert_dur >= 60:
+        parts.append("DRIVER_STATE=SUSTAINED_ALERT_STRONG — sensors show clear recovery, acknowledge it warmly")
+    elif alert_dur >= 20:
+        parts.append("DRIVER_STATE=RECOVERING — sensors show improving alertness, positive reinforcement helps")
+    elif metrics.get('drowsy_score', 0) >= 0.65:
+        parts.append("DRIVER_STATE=SIGNIFICANTLY_DROWSY — escalate engagement, consider pull-over suggestion")
+    elif metrics.get('drowsy_score', 0) >= 0.45:
+        parts.append("DRIVER_STATE=MILDLY_DROWSY — keep engagement high")
+
     return "DETECTION: " + ", ".join(parts)
