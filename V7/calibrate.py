@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import Config
 from memory import MemoryManager
 from stt_engine import STTEngine
+from tts_engine import TTSEngine
 from voice_features import VoiceFeatureExtractor
 
 
@@ -71,17 +72,31 @@ def run_calibration(num_sentences=5, reset=False):
     print("   TIP: Sit in the same position you'd be in while driving.")
     print("=" * 60)
 
+    tts = TTSEngine()
     stt = STTEngine()
     extractor = VoiceFeatureExtractor()
+
+    # Spoken intro
+    tts.speak(
+        "Welcome to voice calibration. "
+        "I'll read each phrase out loud — just repeat it back to me "
+        "in your normal, natural speaking voice. "
+        "Ready? Let's begin."
+    )
+    tts.wait_until_done()
 
     samples = []
 
     for i in range(num_sentences):
         prompt = PROMPTS[i % len(PROMPTS)]
-        print(f"\n  [{i+1}/{num_sentences}] Please read aloud:")
+        print(f"\n  [{i+1}/{num_sentences}] Phrase:")
         print(f'  >>> "{prompt}"')
-        print("  🎤 Listening...")
 
+        # Speak the phrase so the driver knows exactly what to say
+        tts.speak(prompt)
+        tts.wait_until_done()
+
+        print("  🎤 Your turn — repeat that phrase now...")
         extractor.mark_prompt_end()
         text, audio = stt.listen(timeout=15, show_diagnostics=False)
 
@@ -98,8 +113,12 @@ def run_calibration(num_sentences=5, reset=False):
                     print(f"     Heard: \"{text}\"")
             else:
                 print("  ⚠️ Couldn't extract features — skipping this one")
+                tts.speak("Didn't catch that one, moving on.")
+                tts.wait_until_done()
         else:
             print("  ⚠️ No audio captured — skipping")
+            tts.speak("No audio detected, moving on.")
+            tts.wait_until_done()
 
         if i < num_sentences - 1:
             print()
@@ -110,6 +129,9 @@ def run_calibration(num_sentences=5, reset=False):
     if len(samples) < 2:
         print("⚠️ Not enough valid samples (got {}, need at least 2)".format(len(samples)))
         print("   Try again with: python calibrate.py")
+        tts.speak("Not enough samples recorded. Please run calibration again.")
+        tts.wait_until_done()
+        tts.shutdown()
         stt.cleanup()
         memory.close()
         return
@@ -130,6 +152,13 @@ def run_calibration(num_sentences=5, reset=False):
     print("  normal voice patterns during drowsiness conversations.")
     print("=" * 60)
 
+    tts.speak(
+        f"Calibration complete. I recorded {len(samples)} samples of your voice. "
+        "I'll use these to recognize when you sound different from your normal self. "
+        "You're all set."
+    )
+    tts.wait_until_done()
+    tts.shutdown()
     stt.cleanup()
     memory.close()
 

@@ -20,8 +20,10 @@ Usage:
 import cv2
 import mediapipe as mp
 import signal
+import subprocess
 import time
 import threading
+import numpy as np
 from collections import deque
 
 from config import Config
@@ -45,6 +47,86 @@ from detection import (
 )
 from metric_reasoner import MetricReasoner
 from dashboard import DashboardRenderer
+
+
+# =========================
+# ALARM + OPENING LINE
+# =========================
+def play_alarm(duration=4.0):
+    """Play an urgent two-tone siren through ALSA (aplay) — no files needed.
+
+    Generates a 880/1760 Hz alternating sine wave as raw PCM in memory
+    and pipes it directly to aplay. Works on RPi with no extra packages.
+    Falls back silently if aplay is unavailable.
+    """
+    try:
+        sample_rate = 44100
+        t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
+        # Alternate between 880 Hz and 1760 Hz every 0.25 s (urgent police-style)
+        freq = np.where((t * 4).astype(int) % 2 == 0, 880.0, 1760.0)
+        wave = (np.sin(2 * np.pi * freq * t) * 28000).astype(np.int16)
+        proc = subprocess.Popen(
+            ["aplay", "-r", str(sample_rate), "-f", "S16_LE", "-c", "1", "-"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        proc.stdin.write(wave.tobytes())
+        proc.stdin.close()
+        try:
+            proc.wait(timeout=duration + 2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+    except (FileNotFoundError, OSError):
+        print("⚠️ play_alarm: aplay not found — skipping alarm sound")
+    except Exception as e:
+        print(f"⚠️ play_alarm error: {e}")
+
+
+def build_opening_line(freq):
+    """Return a dynamic drowsy-detection announcement based on session history.
+
+    Args:
+        freq: dict from MemoryManager.get_drowsy_frequency()
+
+    Returns:
+        (opening_tts: str, is_serious: bool)
+    """
+    today = freq["today_count"]
+    last_2h = freq["last_2h_count"]
+    severity = freq["severity"]
+
+    if severity == "critical":
+        line = (
+            "Warning. This is now a serious concern — "
+            f"you've been drowsy {today} times today. "
+            "You really need to pull over at the nearest safe spot."
+        )
+    elif severity == "serious":
+        if last_2h >= 2:
+            line = (
+                f"Hey — that's the {last_2h + 1} time in the last two hours. "
+                "I'm getting concerned. Let's talk, but please think about pulling over."
+            )
+        else:
+            line = (
+                f"Hey, this is the {today + 1}th time today you've been drowsy. "
+                "I'm here to help, but this is becoming a pattern."
+            )
+    elif severity == "elevated":
+        line = (
+            "Hey, looks like you're feeling drowsy again. I'm here with you — let's talk."
+        )
+    elif today == 0:
+        line = (
+            "Hey, I'm detecting some drowsiness. I'm Sentinel — I'm here to help."
+        )
+    else:
+        line = "Hey, feeling drowsy again? I've got you — let's get you back on track."
+
+    is_serious = severity in ("serious", "critical")
+    return line, is_serious
 
 
 # =========================
@@ -317,7 +399,7 @@ def run_detection_loop(cap, face_mesh, state, reasoner, ear_thresh=None):
 # =========================
 def run_llm_conversation(tts, stt, llm_assistant, metrics, state,
                          voice_extractor, memory_manager, reasoner=None,
-                         ear_thresh=None):
+                         ear_thresh=None, drowsy_freq=None):
     """Run conversation loop with raw metric injection and SQLite session tracking.
 
     Architecture (Linux/RPi compatible):
@@ -373,6 +455,7 @@ def run_llm_conversation(tts, stt, llm_assistant, metrics, state,
         detection_context, baselines_str, max(0, session_count),
         reasoner_context=reasoner_context,
         driver_history=driver_history,
+        drowsy_freq=drowsy_freq,
     )
 
     # ── Conversation worker (runs in background thread) ──
@@ -435,6 +518,7 @@ def run_llm_conversation(tts, stt, llm_assistant, metrics, state,
             return response
 
         hard_exit = {'exit', 'quit', 'bye', 'goodbye', 'bye bye', 'stop talking'}
+        consecutive_no_response = 0  # Tracks back-to-back silent turns
 
         def _check_alert_recovery():
             """Check if driver has been alert long enough to auto-end."""
@@ -456,6 +540,7 @@ def run_llm_conversation(tts, stt, llm_assistant, metrics, state,
             user_input, audio_data = stt.listen(timeout=20, show_diagnostics=False)
 
             if user_input:
+                consecutive_no_response = 0  # Reset on any response
                 if user_input.lower().strip() in hard_exit:
                     print("🔚 User requested exit")
                     tts.speak("Alright, I'll be here if you need me. Stay safe!")
@@ -469,17 +554,50 @@ def run_llm_conversation(tts, stt, llm_assistant, metrics, state,
                 if _check_alert_recovery():
                     break
             else:
-                print("⚠️  No response detected")
-                tts.speak("Are you still there? Give me a quick response if you can hear me.")
+                consecutive_no_response += 1
+                print(f"⚠️  No response detected (consecutive: {consecutive_no_response})")
+
+                if consecutive_no_response >= 2:
+                    # Driver has not responded twice in a row — trigger emergency alarm
+                    print("🚨 Driver unresponsive — triggering alarm")
+                    tts.speak(
+                        "ALERT. Driver unresponsive. "
+                        "Please pull over at the nearest safe location immediately."
+                    )
+                    tts.wait_until_done()
+                    # Play siren in a background thread so it doesn't block
+                    alarm_thread = threading.Thread(
+                        target=play_alarm, args=(5.0,), daemon=True
+                    )
+                    alarm_thread.start()
+                    alarm_thread.join(timeout=6.0)
+                    break
+
+                tts.speak("Hey — are you still with me? Give me a quick response.")
                 tts.wait_until_done()
                 voice_extractor.mark_prompt_end()
 
                 retry_input, retry_audio = stt.listen(timeout=15, show_diagnostics=False)
                 if not retry_input:
-                    print("⚠️  Still no response — ending conversation")
-                    tts.speak("I'll keep monitoring. Stay safe!")
-                    tts.wait_until_done()
+                    # Count the retry miss toward consecutive counter too
+                    consecutive_no_response += 1
+                    if consecutive_no_response >= 2:
+                        print("🚨 Driver unresponsive after retry — triggering alarm")
+                        tts.speak(
+                            "ALERT. Driver unresponsive. "
+                            "Please pull over at the nearest safe location immediately."
+                        )
+                        tts.wait_until_done()
+                        alarm_thread = threading.Thread(
+                            target=play_alarm, args=(5.0,), daemon=True
+                        )
+                        alarm_thread.start()
+                        alarm_thread.join(timeout=6.0)
+                    else:
+                        tts.speak("I'll keep monitoring. Stay alert!")
+                        tts.wait_until_done()
                     break
+                consecutive_no_response = 0
                 response = _handle_user_turn(retry_input, retry_audio)
                 if response and "[RECOVERED]" in response:
                     print("🟢 LLM determined driver has recovered")
@@ -682,8 +800,10 @@ def main():
             if not should_trigger_llm:
                 break
 
-            # Announce drowsiness detection to the driver
-            tts.speak("Drowsiness detected. Starting conversation.")
+            # Dynamic opening based on how many times driver has been drowsy today
+            freq = memory_manager.get_drowsy_frequency()
+            opening_line, is_serious = build_opening_line(freq)
+            tts.speak(opening_line)
             tts.wait_until_done()
 
             # Release main camera before detection thread opens its own
@@ -698,6 +818,7 @@ def main():
                 tts, stt, llm_assistant, final_metrics, state,
                 voice_extractor, memory_manager, reasoner=reasoner,
                 ear_thresh=ear_thresh,
+                drowsy_freq=freq,
             )
 
             # Reopen camera for monitoring (retry — device may take time to release)

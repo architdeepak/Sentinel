@@ -202,6 +202,58 @@ class MemoryManager:
             ).fetchone()
             return row[0] if row else None
 
+    def get_drowsy_frequency(self):
+        """Return drowsiness frequency stats and a severity label.
+
+        Returns a dict:
+          today_count    — completed sessions started today
+          last_2h_count  — completed sessions in the last 2 hours
+          last_30m_count — completed sessions in the last 30 minutes
+          severity       — 'normal' | 'elevated' | 'serious' | 'critical'
+        """
+        now = datetime.now()
+        today_str = now.date().isoformat()  # e.g. "2025-11-01"
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT started_at FROM sessions WHERE ended_at IS NOT NULL "
+                "ORDER BY id DESC LIMIT 50"
+            ).fetchall()
+
+        today_count = 0
+        last_2h_count = 0
+        last_30m_count = 0
+
+        for (started_at,) in rows:
+            try:
+                ts = datetime.fromisoformat(started_at)
+            except (ValueError, TypeError):
+                continue
+            age_minutes = (now - ts).total_seconds() / 60
+            if started_at.startswith(today_str):
+                today_count += 1
+            if age_minutes <= 120:
+                last_2h_count += 1
+            if age_minutes <= 30:
+                last_30m_count += 1
+
+        # Severity levels
+        if last_30m_count >= 2 or last_2h_count >= 4 or today_count >= 6:
+            severity = "critical"
+        elif last_30m_count >= 1 or last_2h_count >= 2 or today_count >= 3:
+            severity = "serious"
+        elif last_2h_count >= 1 or today_count >= 2:
+            severity = "elevated"
+        else:
+            severity = "normal"
+
+        return {
+            "today_count": today_count,
+            "last_2h_count": last_2h_count,
+            "last_30m_count": last_30m_count,
+            "severity": severity,
+        }
+
     def get_driver_history_for_llm(self):
         """Build a rich driver history summary from past sessions for LLM context.
 

@@ -43,7 +43,7 @@ class LLMAssistant:
 
     def start_conversation(self, detection_context, voice_baselines_str,
                            session_count=0, reasoner_context="",
-                           driver_history=""):
+                           driver_history="", drowsy_freq=None):
         """Start a new conversation with raw detection context and driver profile.
 
         Args:
@@ -51,6 +51,7 @@ class LLMAssistant:
             voice_baselines_str: string from memory_manager.format_baselines_for_llm()
             session_count: number of prior sessions (0 = first activation ever)
             reasoner_context: string from MetricReasoner.get_reasoning_for_llm() — 8B analysis
+            drowsy_freq: dict from MemoryManager.get_drowsy_frequency()
         """
         self.conversation_turns = 0
         self._covered_topics = []
@@ -58,7 +59,35 @@ class LLMAssistant:
         # Get driver profile from SQLite facts
         profile_summary = self.memory_manager.get_profile_summary()
 
-        # Build session context for varied, personalized openings
+        # Build severity context from drowsy frequency data
+        freq = drowsy_freq or {"today_count": 0, "last_2h_count": 0,
+                               "last_30m_count": 0, "severity": "normal"}
+        severity = freq["severity"]
+        today_count = freq["today_count"]
+        last_2h_count = freq["last_2h_count"]
+
+        if severity == "critical":
+            severity_context = (
+                f"CRITICAL DROWSINESS PATTERN: This driver has been drowsy {today_count} times today "
+                f"and {last_2h_count} times in the last 2 hours. This is a serious safety situation. "
+                "You MUST strongly and repeatedly advise them to take the nearest exit and pull over safely. "
+                "Be direct, caring, and firm. Do not let this drop — bring it up naturally but persistently every few turns."
+            )
+        elif severity == "serious":
+            severity_context = (
+                f"CONCERNING PATTERN: This driver has been drowsy {today_count} times today "
+                f"({'including ' + str(last_2h_count) + ' times in the last 2 hours' if last_2h_count >= 2 else 'a growing pattern'}). "
+                "Make sure to bring up the option of pulling over. Don't lecture — just weave it in naturally as genuine concern."
+            )
+        elif severity == "elevated":
+            severity_context = (
+                f"This is not the driver's first episode today ({today_count} total). "
+                "Mention the pattern gently at some point — but keep the tone supportive, not alarming."
+            )
+        else:
+            severity_context = "First drowsy episode detected. Standard engagement."
+
+        # Build session familiarity context
         if session_count == 0:
             session_context = ("FIRST ACTIVATION EVER for this driver. "
                              "Introduce yourself briefly: 'Hey, I'm Sentinel, your drowsy driving companion.' "
@@ -97,6 +126,9 @@ This is what you know about this driver's drowsiness patterns from previous acti
 
 ## Session Context
 {session_context}
+
+## Drowsiness Severity — READ THIS FIRST
+{severity_context}
 
 ## Driver Profile
 {profile_summary}
