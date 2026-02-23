@@ -111,6 +111,7 @@ def run_calibration(num_sentences=5, reset=False):
         print("⚠️ Not enough valid samples (got {}, need at least 2)".format(len(samples)))
         print("   Try again with: python calibrate.py")
         stt.cleanup()
+        memory.close()
         return
 
     memory.store_calibration_baselines(samples)
@@ -130,6 +131,7 @@ def run_calibration(num_sentences=5, reset=False):
     print("=" * 60)
 
     stt.cleanup()
+    memory.close()
 
 
 if __name__ == "__main__":

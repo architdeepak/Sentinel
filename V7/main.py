@@ -688,7 +688,9 @@ def main():
 
             # Release main camera before detection thread opens its own
             cap.release()
+            cap = None
             face_mesh.close()
+            face_mesh = None
             cv2.destroyAllWindows()
 
             # Run conversation with raw metric injection + 8B reasoning + SQLite session
@@ -736,8 +738,10 @@ def main():
                 memory_manager.extract_and_store_facts(sid)
             except Exception as e:
                 print(f"⚠️ Final extraction failed: {e}")
-        cap.release()
-        face_mesh.close()
+        if cap is not None:
+            cap.release()
+        if face_mesh is not None:
+            face_mesh.close()
         cv2.destroyAllWindows()
         stt.cleanup()
         tts.shutdown()

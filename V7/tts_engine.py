@@ -92,7 +92,11 @@ class TTSEngine:
                                 self.metrics_logger.log_tts_first_audio()
 
                 proc.stdin.close()
-                proc.wait(timeout=30)
+                try:
+                    proc.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
 
                 total_ms = (time.perf_counter() - t_start) * 1000
 

@@ -78,6 +78,7 @@ def process_eye_metrics(landmarks, state, now, ear_thresh=None):
             state['blink_times'].append(now)
             state['blink_durations'].append(duration)
             state['eye_closed_start'] = None
+            state['blink_start'] = None
 
     microsleep = (state['eye_closed_start'] is not None and
                   (now - state['eye_closed_start'] >= Config.MICROSLEEP_TIME))
@@ -156,9 +157,11 @@ def cleanup_windows(state, now):
         state['closed_window'].popleft()
     while state['blink_times'] and state['blink_times'][0] < cutoff:
         state['blink_times'].popleft()
-        # Keep blink_durations in sync with blink_times (1-to-1 pairing)
+        # Always pop both together — they are 1-to-1 paired
         if state['blink_durations']:
             state['blink_durations'].popleft()
+        else:
+            break  # deques are out of sync; stop to avoid further corruption
     while state['yawn_times'] and state['yawn_times'][0] < cutoff:
         state['yawn_times'].popleft()
 

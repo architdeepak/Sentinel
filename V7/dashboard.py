@@ -15,6 +15,7 @@ called from a single thread.
 import cv2
 import threading
 import numpy as np
+from config import Config
 
 
 # ── Layout constants ──
@@ -174,7 +175,6 @@ class DashboardRenderer:
             cv2.putText(img, f"Alert for: {dur_str}", (10, y),
                         _FONT, 0.5, _GREEN, 1)
             # Progress bar toward auto-recovery threshold
-            from config import Config
             progress = min(alert_dur / Config.ALERT_RECOVERY_SECS, 1.0)
             _bar(img, 220, y - 12, 200, 14, progress, 1.0, _GREEN)
             if progress >= 1.0:
