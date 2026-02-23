@@ -867,6 +867,10 @@ Return [] if not enough data for meaningful patterns.""")
             f"{'DRIVER' if role == 'user' else 'SENTINEL'}: {text}"
             for role, text in self.conversation_transcript
         )
+        # Truncate to last 4000 chars so the prompt fits in context and
+        # leaves enough room for a full JSON output
+        if len(transcript) > 4000:
+            transcript = "...[earlier turns omitted]\n" + transcript[-4000:]
 
         # Include existing facts so the LLM can avoid near-duplicates
         existing_facts = self.get_context_facts(limit=30)
@@ -912,7 +916,7 @@ Example:
                     {"role": "user", "content": extraction_prompt}
                 ],
                 temperature=0.1,
-                max_tokens=500,
+                max_tokens=1200,
             )
 
             raw = response.choices[0].message.content.strip()
@@ -945,6 +949,28 @@ Example:
             return count
 
         except json.JSONDecodeError as e:
+            # Model was cut off mid-JSON — try to salvage complete objects from the partial output
+            try:
+                # Close the array and strip any dangling incomplete object
+                partial = raw[:raw.rfind("}") + 1] + "]" if "}" in raw else "[]"
+                facts = json.loads(partial)
+                if not isinstance(facts, list):
+                    facts = []
+                count = 0
+                for fact in facts:
+                    if not isinstance(fact, dict):
+                        continue
+                    ft = fact.get("type", "").strip()
+                    val = fact.get("value", "").strip()
+                    if ft and val:
+                        self._store_fact(ft, val, session_id)
+                        count += 1
+                if count:
+                    print(f"⚠️ LLM extraction was truncated — recovered {count} complete facts")
+                    self.conversation_transcript = []
+                    return count
+            except Exception:
+                pass
             print(f"⚠️ LLM extraction returned invalid JSON: {e}")
             return 0
         except Exception as e:
