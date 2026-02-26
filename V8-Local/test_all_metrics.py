@@ -309,6 +309,10 @@ def section_0_setup() -> dict:
         llm = LLMAssistant(ctx.get('tts'), ctx.get('memory'))
         ok("LLMAssistant (Granite 1B local)")
         ctx['llm'] = llm
+        # Share the raw Llama instance with MemoryManager so fact extraction works
+        if ctx.get('memory') and llm.llm is not None:
+            ctx['memory'].set_llm(llm.llm)
+            ok("MemoryManager ← Llama instance shared (fact extraction enabled)")
     except Exception as e:
         warn(f"LLMAssistant failed: {e}")
         ctx['llm'] = None
