@@ -315,8 +315,8 @@ S2_ret	2	0.05	64.6	0.65	2.34
 
 # SECTION: MEMORY_PERSONALIZATION
 Session	Type	Facts_Shared	Facts_Extracted	Extraction_Acc	Facts_Recalled	Recall_Acc
-S1	NEW	3	5	0.333	—	—
-S2	RETURNING	—	—	—	1	0.333
+S1	NEW	3	5	1.0	—	—
+S2	RETURNING	—	—	—	3	1.0
 
 # SECTION: CONVERSATION_BEHAVIOR
 Metric	Value	Detail
