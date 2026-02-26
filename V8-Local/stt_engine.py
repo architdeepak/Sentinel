@@ -57,11 +57,11 @@ class STTEngine:
             self.model = None
 
     def _clear_buffer(self):
-        """Flush stale audio from the stream buffer before listening."""
+        """Drain ALL buffered audio so stale mic input is discarded before listening."""
         if not self.stream:
             return
         try:
-            for _ in range(5):
+            while self.stream.get_read_available() >= Config.VOSK_BUFFER_SIZE:
                 self.stream.read(Config.VOSK_BUFFER_SIZE, exception_on_overflow=False)
         except Exception:
             pass
@@ -114,8 +114,11 @@ class STTEngine:
                         last_text_time = time.perf_counter()
                         print(f"   📝 Heard: '{text}'")
 
-                # 2 seconds of silence after last recognized phrase = done
-                if last_text_time and (time.perf_counter() - last_text_time) > 2.0:
+                # 3 seconds of silence after last recognized phrase = done
+                # Also require at least 4s total listen time so user has time to start
+                if (last_text_time
+                        and (time.perf_counter() - last_text_time) > 3.0
+                        and (time.perf_counter() - t_start) > 4.0):
                     break
 
             # Collect any partial result the recognizer is still holding
