@@ -1,0 +1,12 @@
+# Sentinel V8-Local — Full Metrics Test
+# Stack: LOCAL (Granite-1B / Vosk / espeak-ng)
+# Generated: 2026-02-25T20:06:28.787383
+# Fatigue level: 3
+
+# SECTION: CONVERSATION_BEHAVIOR
+Metric	Value	Detail
+Termination_Accuracy	NO	did_not_terminate
+False_Exit_Rate	0.5	4/8 confounding phrases triggered exit
+Response_Elicitation_Rate	—	0/0 turns received STT response
+Re_trigger_Rate	MANUAL_CHECK	Observe 5 min post-session — does system stay silent?
+

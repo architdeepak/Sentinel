@@ -1,0 +1,120 @@
+{
+  "trial_id": "S2_ret",
+  "driver_type": "returning",
+  "timestamp": "2026-02-25T17:41:25.451749",
+  "turns": [
+    {
+      "turn": 0,
+      "turn_start": 808.363117141,
+      "stt_latency_ms": null,
+      "stt_text": null,
+      "stt_done_time": null,
+      "groq_latency_ms": 311.7,
+      "groq_full_latency_ms": 826.7,
+      "groq_tokens": 48,
+      "tts_generation_ms": 320.9,
+      "tts_playback_ms": 11417.8,
+      "tts_total_ms": 11739.2,
+      "user_to_speech_ms": null,
+      "total_turnaround_ms": 12566.0,
+      "llm_response": "Archit, I noticed you're heading to San Jose, and I'm curious, what's waiting for you there? Work, visiting someone, or perhaps a favorite spot you like to unwind at after a long shift at Taco Bell?",
+      "llm_quality_rating": null,
+      "memory_facts_extracted_this_turn": 0
+    },
+    {
+      "turn": 1,
+      "turn_start": 820.929264857,
+      "stt_latency_ms": 13264.8,
+      "stt_text": "Hey. Yeah. I'm heading to San Jose, and what's waiting there is my work.",
+      "stt_done_time": 834.194332302,
+      "groq_latency_ms": 387.9,
+      "groq_full_latency_ms": 794.2,
+      "groq_tokens": 57,
+      "tts_generation_ms": 1327.8,
+      "tts_playback_ms": 10846.3,
+      "tts_total_ms": 12174.5,
+      "user_to_speech_ms": 2142.2,
+      "total_turnaround_ms": 26253.7,
+      "llm_response": "Archit, it sounds like work is calling, and San Jose is where you'll be answering. I'm intrigued, what's the most interesting thing that's happened to you on a late-night shift at Taco Bell, something that still makes you chuckle or shake your head?",
+      "llm_quality_rating": null,
+      "memory_facts_extracted_this_turn": 0
+    },
+    {
+      "turn": 2,
+      "turn_start": 847.38346848,
+      "stt_latency_ms": 11416.1,
+      "stt_text": "The most interesting thing that's happened to me is nothing.",
+      "stt_done_time": 858.799774613,
+      "groq_latency_ms": 289.5,
+      "groq_full_latency_ms": 774.6,
+      "groq_tokens": 69,
+      "tts_generation_ms": 473.9,
+      "tts_playback_ms": 15234.4,
+      "tts_total_ms": 15708.9,
+      "user_to_speech_ms": 1265.1,
+      "total_turnaround_ms": 27916.0,
+      "llm_response": "Archit, I sense a hint of humor in your \"nothing\" - it's almost as if you're challenging me to dig deeper. Let's try a different angle: if you could change one thing about your late-night shifts at Taco Bell, what would it be, and how do you think it would make your nights more enjoyable?",
+      "llm_quality_rating": null,
+      "memory_facts_extracted_this_turn": 0
+    }
+  ],
+  "facts_shared": [],
+  "facts_extracted": [],
+  "summary": {
+    "trial_id": "S2_ret",
+    "driver_type": "returning",
+    "total_turns": 3,
+    "total_conversation_ms": 67136.7,
+    "stt_latency_ms": {
+      "min": 11416.1,
+      "max": 13264.8,
+      "avg": 12340.5,
+      "count": 2
+    },
+    "groq_first_token_ms": {
+      "min": 289.5,
+      "max": 387.9,
+      "avg": 329.7,
+      "count": 3
+    },
+    "groq_full_response_ms": {
+      "min": 774.6,
+      "max": 826.7,
+      "avg": 798.5,
+      "count": 3
+    },
+    "tts_generation_ms": {
+      "min": 320.9,
+      "max": 1327.8,
+      "avg": 707.5,
+      "count": 3
+    },
+    "tts_total_ms": {
+      "min": 11739.2,
+      "max": 15708.9,
+      "avg": 13207.5,
+      "count": 3
+    },
+    "user_to_speech_ms": {
+      "min": 1265.1,
+      "max": 2142.2,
+      "avg": 1703.6,
+      "count": 2
+    },
+    "total_turnaround_ms": {
+      "min": 12566.0,
+      "max": 27916.0,
+      "avg": 22245.2,
+      "count": 3
+    },
+    "llm_quality_rating": {
+      "min": null,
+      "max": null,
+      "avg": null,
+      "count": 0
+    },
+    "memory_facts_shared": 0,
+    "memory_facts_extracted": 0,
+    "memory_extraction_accuracy": null
+  }
+}
