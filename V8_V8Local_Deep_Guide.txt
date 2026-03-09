@@ -1,0 +1,304 @@
+V8 and V8-Local Deep Guide (Beginner Friendly)
+=============================================
+
+Purpose of this file
+--------------------
+This guide explains how the V8 and V8-Local driver drowsiness systems work, end-to-end, in plain language.
+It includes architecture, formulas, trigger logic, thresholds, LLM prompt design, and the local rule engine.
+
+
+1) Big Picture: What These Systems Do
+-------------------------------------
+Both systems try to detect driver drowsiness and start a safety conversation before things get dangerous.
+
+Both versions use:
+- Camera-based metrics (eyes, blinks, head movement)
+- Voice-based metrics (energy, speech rate, pauses, response delay)
+- A conversation assistant that talks to the driver
+
+Main difference:
+- V8: Uses cloud LLMs (Groq 70B + 8B reasoner)
+- V8-Local: Uses local models/rules (no cloud API dependency)
+
+
+2) Core Terms (Simple Definitions)
+----------------------------------
+- Metric: A number measured from sensor data. Example: blink count.
+- Threshold: A cutoff value that decides if something is high/low enough to matter.
+- Pre-filter: A quick local check before expensive reasoning.
+- Reasoner: The component that decides alertness level (ALERT/MILD/DROWSY/CRITICAL).
+- Microsleep: Eyes closed continuously for a dangerous duration (here: >1.5 seconds).
+- Baseline: Your personal normal value, learned over time. Example: your normal speech rate.
+- Trend: Direction over time (getting worse, stable, or improving).
+- Confirmation count: How many consecutive drowsy classifications happened in a row.
+
+
+3) High-Level Flow (Both V8 and V8-Local)
+------------------------------------------
+1. Capture camera frame
+2. Run MediaPipe Face Mesh to get facial landmarks
+3. Compute vision metrics (PERCLOS, blinks, etc.)
+4. Build local weighted drowsy_score
+5. If microsleep is true -> instant trigger
+6. Else if drowsy_score passes pre-filter -> run reasoner (8B in V8, local rules in V8-Local)
+7. Need consecutive drowsy confirmations before triggering conversation
+8. During conversation, continue live detection and show dashboard
+
+
+4) Vision Metrics and What They Mean
+------------------------------------
+- EAR (Eye Aspect Ratio): Eye openness geometry from eye landmarks.
+  Lower EAR usually means eyes are more closed.
+
+- PERCLOS (0 to 1): Fraction of recent time eyes were closed.
+  Example: 0.25 means eyes were closed 25 percent of the tracked window.
+
+- blink_rate: Blink count in the recent window (here, 10 seconds).
+
+- slow_blinks: Blink count where blink duration is longer than SLOW_BLINK_TIME.
+
+- ear_std: Standard deviation of EAR values.
+  Standard deviation = how much values vary around their average.
+
+- pitch_var: Variance of vertical head movement proxy.
+  Variance = spread of values; higher can mean more nodding.
+
+- head_down/head_roll: Boolean flags for sustained downward tilt or roll tilt.
+
+
+5) Local Weighted Vision Score Formula (Used in V8 and V8-Local)
+-----------------------------------------------------------------
+The local camera score is:
+
+drowsy_score = min(1.0,
+  0.30 * perclos +
+  0.20 * int(microsleep) +
+  0.20 * min(slow_blinks / 8, 1.0) +
+  0.15 * min(ear_std / 0.20, 1.0) +
+  0.05 * min(pitch_var / 0.015, 1.0) +
+  0.05 * int(head_down) +
+  0.05 * int(head_roll)
+)
+
+Plain English:
+- PERCLOS and microsleep matter most.
+- Slow blinks also matter a lot.
+- Head signals matter less (small weights).
+- Score is clipped to max 1.0.
+
+
+6) Trigger Logic in V8
+----------------------
+Important values:
+- REASONER_PRE_FILTER = 0.55
+- REASONER_INTERVAL_S = 3.0
+- REASONER_CONFIRM_COUNT = 3
+
+Logic:
+1. If microsleep == True: trigger immediately (bypass reasoner gates).
+2. Else, only call the 8B reasoner when local drowsy_score > 0.55.
+3. Reasoner calls are throttled: at least 3 seconds between calls.
+4. Conversation trigger needs 3 consecutive reasoner outputs of DROWSY or CRITICAL.
+
+Nuance:
+- "Every 3 seconds" is not exact clockwork; it is minimum spacing (>= 3.0s).
+
+
+7) How the 8B Reasoner Works in V8 (Cloud)
+-------------------------------------------
+Model:
+- Config.GROQ_REASONER_MODEL (llama-3.1-8b-instant)
+
+Inputs to 8B each evaluation:
+- Current visual metrics
+- Optional current voice metrics
+- Optional voice-vs-baseline deviations
+- Recent history snapshots (trend context)
+
+Output format:
+- Strict JSON only
+- level: ALERT | MILD | DROWSY | CRITICAL
+- confidence: 0.0 to 1.0
+- reasoning: short explanation
+
+8B system prompt rules emphasize:
+- Microsleep is always CRITICAL
+- Convergence of signals (not one noisy metric)
+- PERCLOS and slow blinks are most reliable
+- Head-down/roll alone are weak signals
+- Voice is supplementary, not primary
+
+
+8) How the 70B Conversation Model Is Prompted in V8
+----------------------------------------------------
+Model:
+- Config.GROQ_MODEL (llama-3.3-70b-versatile)
+
+System prompt includes:
+- Session context (first-time or returning user)
+- Severity context from drowsiness frequency history
+- Driver profile and known facts
+- Initial raw detection state
+- Optional 8B pre-assessment section
+- Driver voice baselines
+- Metric interpretation guide
+- Strict conversation behavior contract and safety rules
+
+Per turn, user message is enriched with:
+- [detection_context] raw live vision metrics
+- [voice_context] raw live voice metrics
+- [already covered topics] anti-repetition guard
+- Driver utterance text
+
+Goal:
+- Keep driver engaged and alert via personalized conversation.
+- Escalate when safety risk rises.
+
+
+9) Voice Metrics and Baseline Logic
+-----------------------------------
+Voice features tracked:
+- energy_rms: speech energy/volume proxy
+- speech_rate_wpm: words per minute
+- pause_ratio: share of speaking time that is silence
+- response_latency_s: delay from prompt to speech start
+
+Why baseline matters:
+- People have different normal voices.
+- Absolute values are less useful than deviation from personal norm.
+
+Example interpretation:
+- "Energy = 62% of baseline" means notably quieter than normal.
+
+
+10) What Changes in V8-Local
+----------------------------
+No cloud APIs required for reasoning.
+
+V8-Local replaces cloud 8B reasoner with local threshold rules in Python.
+Public interface stays the same, so the rest of the pipeline is similar.
+
+Key local gate settings (same trigger structure):
+- REASONER_PRE_FILTER = 0.55
+- REASONER_INTERVAL_S = 3.0
+- REASONER_CONFIRM_COUNT = 3
+
+Microsleep still bypasses for instant critical trigger.
+
+
+11) V8-Local Reasoner Scoring Rules (Exact)
+--------------------------------------------
+Local reasoner builds integer "signals".
+Then maps total signals to level.
+
+A) Visual signal points
+- PERCLOS > 0.40 -> +3
+- PERCLOS > 0.20 -> +2
+- PERCLOS > 0.10 -> +1
+
+- slow_blinks >= 3 -> +2
+- slow_blinks >= 1 -> +1
+
+- pitch_var > 0.010 -> +1
+
+- ear_std < 0.010 AND perclos > 0.15 -> +1
+
+B) Voice supplementary rule
+- Count voice deviations using baselines:
+  - energy < 55% of baseline (45%+ drop)
+  - speech_rate < 60% of baseline (40%+ drop)
+  - pause_ratio > 1.75x baseline (75%+ above)
+  - response_latency > baseline + 5.0s
+- If voice_deviations >= 2 AND visual_signals >= 1 -> +1 extra signal
+
+C) Trend adjustment
+- Worsening trend -> +1
+  - perclos increased by >0.05 OR slow_blinks increased by >1
+- Improving trend -> -1 (if signals > 0)
+  - perclos dropped by >0.05 AND slow_blinks not increased
+
+D) Signal-to-level mapping
+- signals >= 5 -> CRITICAL (confidence 0.92)
+- signals >= 3 -> DROWSY (confidence 0.78)
+- signals >= 1 -> MILD (confidence 0.55)
+- signals == 0 -> ALERT (confidence 0.85)
+
+Microsleep special case:
+- Immediate CRITICAL with high confidence.
+
+
+12) Common Misunderstanding: "3 scores above threshold"
+---------------------------------------------------------
+Formula like:
+trigger = (S_t > X) AND (S_{t-1} > X) AND (S_{t-2} > X)
+
+This is NOT the full V8/V8-Local logic.
+
+Actual logic:
+- Local score > pre-filter only decides when to run reasoner.
+- Final trigger depends on consecutive reasoner outcomes, not just raw score.
+- Microsleep can bypass everything.
+
+
+13) Why This Multi-Layer Design Exists
+---------------------------------------
+- Layer 1 (fast local metrics): cheap, continuous, low latency.
+- Layer 2 (reasoner): reduces false positives from noisy frames.
+- Layer 3 (consecutive confirmations): avoids one-off spikes.
+- Microsleep bypass: immediate safety action for critical events.
+
+This gives better precision than a single hard threshold alone.
+
+
+14) Practical Tuning Tips
+-------------------------
+If you want earlier triggers:
+- Lower REASONER_PRE_FILTER (for example 0.55 -> 0.50)
+- Lower REASONER_CONFIRM_COUNT (for example 3 -> 2)
+
+If you want fewer false positives:
+- Raise REASONER_PRE_FILTER
+- Keep or raise REASONER_CONFIRM_COUNT
+- Increase interval slightly to smooth noise
+
+For voice robustness:
+- Make sure baseline collection is clean (consistent mic distance).
+- Do not overreact to small (<30-40%) deviations.
+
+
+15) File Map (Where Logic Lives)
+---------------------------------
+V8 (cloud):
+- V8/main.py
+  Detection loop, pre-filter gate, trigger action, conversation lifecycle.
+- V8/detection.py
+  Vision metrics + weighted drowsy_score formula.
+- V8/metric_reasoner.py
+  8B reasoner prompt, history assembly, JSON parse, confirmation counting.
+- V8/llm_assistant.py
+  70B system prompt and per-turn enriched user prompt.
+- V8/dashboard.py
+  Live metrics panel rendering.
+
+V8-Local:
+- V8-Local/main.py
+  Same high-level gate flow.
+- V8-Local/metric_reasoner.py
+  Local threshold reasoning replacement for 8B.
+- V8-Local/config.py
+  Threshold values and intervals.
+
+
+16) Quick Mental Model
+----------------------
+Think of the system as:
+- "Sensor math" -> "Reasoning" -> "Safety trigger" -> "Recovery conversation"
+
+Where:
+- Sensor math = continuous numeric signals
+- Reasoning = combines signals and trends
+- Trigger = requires sustained evidence
+- Recovery conversation = intervention until alertness improves
+
+
+End of guide.
