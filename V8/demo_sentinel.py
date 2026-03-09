@@ -95,9 +95,9 @@ STATE_COLORS = {
 DASH_W, DASH_H = 520, 780
 
 # DB card dimensions
-DB_W, DB_H = 720, 660
-DB_BTN_X1, DB_BTN_Y1 = 220, 600
-DB_BTN_X2, DB_BTN_Y2 = 500, 636
+DB_W, DB_H = 720, 720
+DB_BTN_X1, DB_BTN_Y1 = 220, 658
+DB_BTN_X2, DB_BTN_Y2 = 500, 694
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -185,8 +185,13 @@ def seed_demo_database(db_path: Path) -> MemoryManager:
             VALUES (?, ?, ?, 1, ?, ?, ?)
         """, (fact_type, value, confidence, yest, yest, times))
 
-    # ── Voice baselines ───────────────────────────────────────────────────────
+    # ── Camera + Voice baselines ──────────────────────────────────────────────
+    # EAR: Eye Aspect Ratio — Archit's personal open-eye geometry
+    # Stored from the 5-second EAR calibration run at first session startup.
+    # Threshold = avg * 0.75 (75% of personal open-eye EAR = eyes-closed cutoff).
     baselines = {
+        "ear_open_avg":       (0.288, 0.271, 0.304,  5),   # avg open-eye EAR
+        "ear_threshold":      (0.216, 0.203, 0.228,  5),   # personal closed-eye cutoff
         "energy_rms":         (0.038, 0.024, 0.058, 15),
         "speech_rate_wpm":    (138.0, 110.0, 170.0, 15),
         "pause_ratio":        (0.210, 0.130, 0.330, 15),
@@ -268,31 +273,53 @@ def render_db_card(mm: MemoryManager, mode: str = "before") -> np.ndarray:
     y += 8
     div(y); y += 20
 
-    # ── Voice Baselines ───────────────────────────────────────────────────────
+    # ── Stored Baselines ─────────────────────────────────────────────────────
     baselines = mm.get_baselines()
-    t("VOICE BASELINES", 16, y, 0.50, C_CYAN, 1)
+    t("STORED BASELINES  (learned from Archit)", 16, y, 0.50, C_CYAN, 1)
     cal_text = "● calibrated" if baselines else "● not calibrated"
     cal_col  = C_GREEN if baselines else C_YELLOW
     t(cal_text, DB_W - 130, y, 0.40, cal_col)
     y += 8
-    div(y); y += 18
+    div(y); y += 14
 
-    bl_rows = [
-        ("energy_rms",         "Energy RMS",     "{:.4f} avg"),
-        ("speech_rate_wpm",    "Speech Rate",    "{:.0f} wpm avg"),
-        ("pause_ratio",        "Pause Ratio",    "{:.3f} avg"),
-        ("response_latency_s", "Response Delay", "{:.2f}s avg"),
+    # Camera baselines (EAR — eye geometry)
+    t("  Camera / Eye", 16, y, 0.40, C_ORANGE)
+    y += 17
+    cam_bl_rows = [
+        ("ear_open_avg",   "EAR open-eye avg",  "{:.3f}",   "personal eye geometry"),
+        ("ear_threshold",  "EAR closed cutoff", "{:.3f}",   "= open_avg × 0.75"),
     ]
-    for metric, label, fmt in bl_rows:
+    for metric, label, fmt, note in cam_bl_rows:
         bl = baselines.get(metric)
         if not bl:
             continue
         val_s = fmt.format(bl["avg"])
-        rng_s = f"range {bl['min']:.3f}–{bl['max']:.3f}  n={bl['sample_count']}"
-        t(f"  {label:<20}", 16, y, 0.41, C_LGRAY)
-        t(val_s, 212, y, 0.42, C_WHITE)
-        t(rng_s, 340, y, 0.36, C_GRAY)
-        y += 21
+        rng_s = f"range {bl['min']:.3f}–{bl['max']:.3f}   ({note})"
+        t(f"    {label:<22}", 16, y, 0.40, C_LGRAY)
+        t(val_s, 220, y, 0.42, C_WHITE)
+        t(rng_s, 290, y, 0.35, C_GRAY)
+        y += 19
+
+    y += 4
+    # Voice baselines
+    t("  Voice", 16, y, 0.40, C_BLUE)
+    y += 17
+    voice_bl_rows = [
+        ("energy_rms",         "Energy RMS",     "{:.4f}",  "avg speech volume"),
+        ("speech_rate_wpm",    "Speech Rate",    "{:.0f} wpm", "words per minute"),
+        ("pause_ratio",        "Pause Ratio",    "{:.3f}",  "fraction of silence"),
+        ("response_latency_s", "Response Delay", "{:.2f}s", "time to start speaking"),
+    ]
+    for metric, label, fmt, note in voice_bl_rows:
+        bl = baselines.get(metric)
+        if not bl:
+            continue
+        val_s = fmt.format(bl["avg"])
+        rng_s = f"range {bl['min']:.3f}–{bl['max']:.3f}   n={bl['sample_count']}"
+        t(f"    {label:<22}", 16, y, 0.40, C_LGRAY)
+        t(val_s, 220, y, 0.42, C_WHITE)
+        t(rng_s, 290, y, 0.35, C_GRAY)
+        y += 19
 
     y += 8
     div(y); y += 20
@@ -315,7 +342,7 @@ def render_db_card(mm: MemoryManager, mode: str = "before") -> np.ndarray:
             if lines_out >= 4:
                 break
 
-    y = max(y + 10, DB_H - 80)
+    y = max(y + 10, DB_H - 86)
     div(y); y += 14
 
     # ── START button ─────────────────────────────────────────────────────────
