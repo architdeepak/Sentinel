@@ -63,10 +63,12 @@ from metric_reasoner import MetricReasoner, ReasonerResult
 #  DEMO CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
-DEMO_DB_PATH       = Path(__file__).parent / "demo_sentinel.db"
-DEMO_CONFIRM_COUNT = 2          # Confirm on 2 consecutive DROWSY/CRITICAL (not 3)
-BOOST_PERCLOS_MULT = 1.70       # PERCLOS multiplier when boost active
-BOOST_SLOW_ADD     = 2          # Extra slow blinks injected when boost active
+DEMO_DB_PATH            = Path(__file__).parent / "demo_sentinel.db"
+DEMO_CONFIRM_COUNT      = 2     # Confirm on 2 consecutive (not 3)
+DEMO_PRE_FILTER         = 0.18  # Fire 8B as soon as any signal appears
+DEMO_REASONER_INTERVAL  = 1.5   # Call 8B every 1.5s (vs prod 3s)
+BOOST_PERCLOS_MULT      = 2.10  # Aggressive PERCLOS amplification (always on)
+BOOST_SLOW_ADD          = 3     # Extra slow blinks (always on)
 
 # Window titles (stable names — never recreate unnecessarily)
 WIN_CAMERA = "Sentinel  ·  Camera Feed"
@@ -834,8 +836,8 @@ def run_monitoring_phase(
             return True, fm
 
         # ── 8B gate ───────────────────────────────────────────────────────────
-        if (metrics["drowsy_score"] > Config.REASONER_PRE_FILTER
-                and reasoner.should_call()):
+        if (metrics["drowsy_score"] > DEMO_PRE_FILTER
+                and (time.time() - reasoner._last_call_time) >= DEMO_REASONER_INTERVAL):
             result  = reasoner.evaluate(metrics, microsleep, head_down, head_roll)
             confirm = reasoner.get_confirmation_count()
             dashboard.set_reasoner(result, confirm)
@@ -943,8 +945,11 @@ class DemoLLMAssistant(LLMAssistant):
             "  Example shape: 'Archit — [what sensors show in plain English]. "
             "Continuing from our last conversation, [profile-based question]?'\n\n"
             "TURN 2 STRUCTURE:\n"
-            "  Remark on the improvement you can see (eyes more open, quicker "
-            "response — in plain English). Ask one short follow-up question.\n\n"
+            "  First: directly react to what Archit just said in Turn 1 "
+            "(show you heard him — reference his specific words or answer briefly).\n"
+            "  Then: note the improvement you can see — his eyes are more open, "
+            "voice clearer, quicker response. Keep it natural and warm.\n"
+            "  End with one short follow-up question.\n\n"
             "Do not mention PERCLOS, EAR, drowsy_score, or any raw metric names.\n"
         )
 
@@ -1094,7 +1099,18 @@ def run_conversation_phase(
                 feat_t1 = voice_extractor.extract_features(audio_t1, user_t1)
                 if feat_t1:
                     voice_accum.append(feat_t1)
-                    dashboard.update_voice(feat_t1)
+                    # Amplify T1 display so drowsiness is visually obvious on dashboard.
+                    # Real values still go to LLM and transcript — only display is amplified.
+                    disp_t1 = feat_t1.copy()
+                    if disp_t1.get("energy_rms"):
+                        disp_t1["energy_rms"] = round(disp_t1["energy_rms"] * 0.58, 4)
+                    if disp_t1.get("speech_rate_wpm"):
+                        disp_t1["speech_rate_wpm"] = round(disp_t1["speech_rate_wpm"] * 0.65, 1)
+                    if disp_t1.get("response_latency_s") is not None:
+                        disp_t1["response_latency_s"] = round(disp_t1["response_latency_s"] + 2.8, 2)
+                    if disp_t1.get("pause_ratio") is not None:
+                        disp_t1["pause_ratio"] = min(0.90, round(disp_t1["pause_ratio"] + 0.22, 3))
+                    dashboard.update_voice(disp_t1)
 
             det1  = det_thread.get_full_state()
             score_accum.append(det1.get("drowsy_score", 0))
@@ -1129,18 +1145,23 @@ def run_conversation_phase(
                     voice_accum.append(feat_t2)
                     dashboard.update_voice(feat_t2)
 
-            det2 = det_thread.get_full_state()
+            det2  = det_thread.get_full_state()
             score_accum.append(det2.get("drowsy_score", 0))
-            print(f"\n👤  Archit (T2): {user_t2}")
+            dctx2 = format_detection_for_llm(
+                det2,
+                microsleep=det2.get("microsleep", False),
+                head_down=det2.get("head_down", False),
+            )
+            vctx2 = (voice_extractor.format_for_llm(feat_t2, baselines)
+                     if feat_t2 else None)
 
-            # Sentinel: "looking a little better [metric], one more question"
-            resp_t2 = build_t2_response(det2, feat_t2 or {}, baselines)
-            print(f"\n🤖  Sentinel (T2): {resp_t2}")
-            memory_manager.add_to_transcript("user", user_t2)
-            tts.speak(resp_t2)
-            llm_assistant.messages.append({"role": "assistant", "content": resp_t2})
-            memory_manager.add_to_transcript("assistant", resp_t2)
-            llm_assistant.conversation_turns += 1
+            print(f"\n👤  Archit (T2): {user_t2}")
+            # Real 70B LLM — responds to T1 answer + notes improvement in metrics
+            llm_assistant.get_response_streaming(
+                user_message=user_t2,
+                detection_context=dctx2,
+                voice_context=vctx2,
+            )
             tts.wait_until_done()
             voice_extractor.mark_prompt_end()
 
