@@ -22,6 +22,11 @@ Controls during monitoring:
   ESC — exit demo
 """
 
+import os
+# Force X11 backend on RPi — must be set before cv2 is imported
+os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+os.environ.setdefault("DISPLAY", ":0")
+
 import cv2
 import sys
 import time
@@ -354,6 +359,11 @@ def render_db_card(mm: MemoryManager, mode: str = "before") -> np.ndarray:
     tx = DB_BTN_X1 + ((DB_BTN_X2 - DB_BTN_X1) - tw) // 2
     ty = DB_BTN_Y1 + ((DB_BTN_Y2 - DB_BTN_Y1) + th) // 2
     cv2.putText(img, btn_text, (tx, ty), FONT, 0.58, (10, 10, 10), 2, cv2.LINE_AA)
+    # Key hint below button
+    hint = "press  SPACE  or  ENTER  to continue"
+    (hw, _), _ = cv2.getTextSize(hint, FONT, 0.36, 1)
+    cv2.putText(img, hint, (DB_W // 2 - hw // 2, DB_BTN_Y2 + 18),
+                FONT, 0.36, C_LGRAY, 1, cv2.LINE_AA)
 
     # ── Footer ────────────────────────────────────────────────────────────────
     footer = ("Sentinel v8  ·  Groq llama-3.3-70b + llama-3.1-8b  "
@@ -364,27 +374,26 @@ def render_db_card(mm: MemoryManager, mode: str = "before") -> np.ndarray:
 
 
 def show_db_card(mm: MemoryManager, mode: str = "before") -> bool:
-    """Display DB card. Returns True when button clicked, False on ESC."""
-    clicked = [False]
-
-    def on_mouse(event, x, y, flags, param):
-        if event == cv2.EVENT_LBUTTONDOWN:
-            if DB_BTN_X1 <= x <= DB_BTN_X2 and DB_BTN_Y1 <= y <= DB_BTN_Y2:
-                clicked[0] = True
-
+    """Display DB card. Press SPACE/ENTER to continue, ESC to exit.
+    No mouse callback — avoids the NULL window handler crash on RPi/Linux.
+    """
     cv2.namedWindow(WIN_DB, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(WIN_DB, DB_W, DB_H)
-    cv2.setMouseCallback(WIN_DB, on_mouse)
-    cv2.moveWindow(WIN_DB, 180, 80)
+    try:
+        cv2.moveWindow(WIN_DB, 180, 80)
+    except Exception:
+        pass  # moveWindow can fail on some RPi display configs — non-fatal
 
     img = render_db_card(mm, mode)
-    while not clicked[0]:
+    while True:
         cv2.imshow(WIN_DB, img)
         key = cv2.waitKey(50) & 0xFF
-        if key == 27:
+        if key == 27:                          # ESC — exit demo
             cv2.destroyWindow(WIN_DB)
             cv2.waitKey(1)
             return False
+        if key in (32, 13, ord('s'), ord('S')):  # SPACE, ENTER, or S
+            break
 
     cv2.destroyWindow(WIN_DB)
     cv2.waitKey(1)
@@ -744,10 +753,13 @@ def run_monitoring_phase(
 
     cv2.namedWindow(WIN_CAMERA, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(WIN_CAMERA, 480, 360)
-    cv2.moveWindow(WIN_CAMERA,  40, 120)
     cv2.namedWindow(WIN_DASH, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(WIN_DASH, DASH_W, DASH_H)
-    cv2.moveWindow(WIN_DASH,  550, 60)
+    try:
+        cv2.moveWindow(WIN_CAMERA,  40, 120)
+        cv2.moveWindow(WIN_DASH,  550, 60)
+    except Exception:
+        pass  # Window positioning non-fatal on RPi
 
     print("\n" + "─" * 58)
     print("  MONITORING  —  act drowsy, then press B to enhance")
@@ -1169,10 +1181,13 @@ def run_conversation_phase(
     # ── Main thread: display loop ─────────────────────────────────────────────
     cv2.namedWindow(WIN_CAMERA, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(WIN_CAMERA, 480, 360)
-    cv2.moveWindow(WIN_CAMERA,  40, 120)
     cv2.namedWindow(WIN_DASH, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(WIN_DASH, DASH_W, DASH_H)
-    cv2.moveWindow(WIN_DASH,  550, 60)
+    try:
+        cv2.moveWindow(WIN_CAMERA,  40, 120)
+        cv2.moveWindow(WIN_DASH,  550, 60)
+    except Exception:
+        pass  # Window positioning non-fatal on RPi
 
     while not conv_done.is_set():
         cam_f, _ = det_thread.get_display_frames()
