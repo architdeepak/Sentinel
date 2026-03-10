@@ -929,21 +929,23 @@ class DemoLLMAssistant(LLMAssistant):
         super().start_conversation(*args, **kwargs)
 
         demo_hint = (
-            "\n\n## DEMO GUIDANCE — Science Fair  (READ BEFORE TURN 1)\n"
-            "You are live on stage in front of science fair judges right now.\n\n"
-            "RULES — follow these exactly:\n"
-            "1. Keep every response to 2–3 short sentences. No more.\n"
-            "2. Always address Archit by name at least once.\n"
-            "3. TURN 1: He will respond somewhat drowsily / slowly. "
-            "Acknowledge what your sensors are showing. Ask one engaging personal "
-            "question. Reference something specific from his profile "
-            "(science fair project, late-night driving, etc.).\n"
-            "4. TURN 2: He will sound noticeably more alert. "
-            "Remark on the improvement naturally — say something like "
-            "'you sound a lot more present now' or 'that response was sharp'. "
-            "Do NOT mention sensor names to him. "
-            "End your ENTIRE turn-2 response with [RECOVERED] as the very last token.\n"
-            "5. Do not mention PERCLOS, EAR, or technical terms to the driver.\n"
+            "\n\n## DEMO GUIDANCE — Science Fair\n"
+            "You are live in front of science fair judges. Keep ALL responses to "
+            "2–3 sentences max. Always use Archit's name.\n\n"
+            "TURN 1 STRUCTURE — follow this exactly:\n"
+            "  Part A: Call out the drowsiness using what you see in the DETECTION "
+            "data injected with this message — reference the actual metric values "
+            "naturally (e.g. 'your eyes have been closing a lot', 'I'm seeing slow "
+            "blinks', 'eye closure rate is up'). Do NOT say PERCLOS or EAR to him.\n"
+            "  Part B: Say 'Continuing from our last conversation, ...' and ask one "
+            "engaging question about something specific from his profile (his science "
+            "fair project, late-night driving habit, etc.).\n"
+            "  Example shape: 'Archit — [what sensors show in plain English]. "
+            "Continuing from our last conversation, [profile-based question]?'\n\n"
+            "TURN 2 STRUCTURE:\n"
+            "  Remark on the improvement you can see (eyes more open, quicker "
+            "response — in plain English). Ask one short follow-up question.\n\n"
+            "Do not mention PERCLOS, EAR, drowsy_score, or any raw metric names.\n"
         )
 
         self._system_message["content"] += demo_hint
@@ -951,43 +953,63 @@ class DemoLLMAssistant(LLMAssistant):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  TURN-2 RECOVERY RESPONSE (crafted from real voice data)
+#  CRAFTED SENTINEL RESPONSES  (T1 / T2 / T3)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def craft_recovery_response(
-    user_text: str,
-    voice_features: dict,
-    baselines: dict,
-) -> str:
+def build_t2_response(det_state: dict, voice_features: dict, baselines: dict) -> str:
     """
-    Build a Sentinel-style recovery line that references the driver's ACTUAL
-    measured voice improvement from Turn 2. Always ends with [RECOVERED].
+    Turn-2 Sentinel response: acknowledge slight improvement seen in the metrics,
+    ask one more follow-up question to keep the conversation going.
     """
-    rate    = voice_features.get("speech_rate_wpm") or 0
-    latency = voice_features.get("response_latency_s") or 0
-    rate_bl = (baselines.get("speech_rate_wpm") or {}).get("avg", 130)
-    lat_bl  = (baselines.get("response_latency_s") or {}).get("avg", 1.6)
+    perclos = det_state.get("perclos", 0.0)
+    rms     = (voice_features or {}).get("energy_rms") or 0
+    rms_bl  = (baselines.get("energy_rms") or {}).get("avg", 0.038)
 
-    # Natural-language commentary based on measured numbers
-    if latency <= lat_bl + 0.6:
-        engagement = "you jumped right in without missing a beat"
-    elif latency <= lat_bl + 1.8:
-        engagement = "that response came a lot quicker"
+    # Camera improvement comment
+    if perclos < 0.14:
+        cam_note = "your eyes are staying open a lot more"
     else:
-        engagement = "you're sounding much more engaged"
+        cam_note = "I'm seeing a little less eye drooping"
 
-    if rate >= rate_bl * 0.90:
-        voice_note = "and your voice is back at full strength"
-    elif rate >= rate_bl * 0.75:
-        voice_note = "and your speech is clearing up nicely"
+    # Voice improvement comment
+    if rms_bl > 0 and rms >= rms_bl * 0.80:
+        voice_note = "and your voice is coming through stronger"
     else:
-        voice_note = "I can hear you're more awake"
+        voice_note = "and that response sounded a bit more awake"
 
     return (
-        f"Hey Archit — {engagement}, {voice_note}. "
-        f"Everything is looking a lot better on my end. "
-        f"I'll keep watching, but I think you've got it from here — stay sharp. "
-        f"[RECOVERED]"
+        f"You're looking a little better — {cam_note} {voice_note}. "
+        f"Keep it up. Real quick — what time did you leave tonight, "
+        f"and how much longer do you have to drive?"
+    )
+
+
+def build_t3_response(voice_features: dict, baselines: dict) -> str:
+    """
+    Turn-3 Sentinel response: call out the fast, alert response and declare recovery.
+    Always ends with [RECOVERED].
+    """
+    latency = (voice_features or {}).get("response_latency_s") or 0
+    lat_bl  = (baselines.get("response_latency_s") or {}).get("avg", 1.6)
+    rate    = (voice_features or {}).get("speech_rate_wpm") or 0
+    rate_bl = (baselines.get("speech_rate_wpm") or {}).get("avg", 130)
+
+    if latency <= lat_bl + 0.5:
+        speed_note = "You responded instantly"
+    elif latency <= lat_bl + 1.2:
+        speed_note = "That came right back quick"
+    else:
+        speed_note = "You jumped right in"
+
+    if rate >= rate_bl * 0.88:
+        energy_note = "and you sound completely sharp"
+    else:
+        energy_note = "and the sensors are all settling back down"
+
+    return (
+        f"{speed_note} — {energy_note}. "
+        f"That's exactly what I needed to see. You're good, Archit — "
+        f"I'll keep watching but you've got this. [RECOVERED]"
     )
 
 
@@ -1085,6 +1107,7 @@ def run_conversation_phase(
                      if feat_t1 else None)
 
             print(f"\n👤  Archit (T1): {user_t1}")
+            # Real 70B LLM — guided by system prompt to say drowsy ack + last convo
             llm_assistant.get_response_streaming(
                 user_message=user_t1,
                 detection_context=dctx1,
@@ -1093,11 +1116,11 @@ def run_conversation_phase(
             tts.wait_until_done()
             voice_extractor.mark_prompt_end()
 
-            # ── Turn 2 ────────────────────────────────────────────────────────
-            print("\n🎤  Turn 2 — listening (respond normally)…")
+            # ── Turn 2 — user responds normally ───────────────────────────────
+            print("\n🎤  Turn 2 — listening (sound normal)…")
             user_t2, audio_t2 = stt.listen(timeout=25, show_diagnostics=False)
             if not user_t2:
-                user_t2 = "Yeah, I feel much better now, thanks."
+                user_t2 = "Yeah I think I'm doing better now."
 
             feat_t2 = None
             if audio_t2 is not None:
@@ -1108,23 +1131,45 @@ def run_conversation_phase(
 
             det2 = det_thread.get_full_state()
             score_accum.append(det2.get("drowsy_score", 0))
-
             print(f"\n👤  Archit (T2): {user_t2}")
 
-            # Crafted recovery referencing real voice measurements
-            resp_t2 = craft_recovery_response(user_t2, feat_t2 or {}, baselines)
-            print(f"\n🤖  Sentinel (recovery): {resp_t2}")
-
-            # Keep transcripts consistent for fact extraction
+            # Sentinel: "looking a little better [metric], one more question"
+            resp_t2 = build_t2_response(det2, feat_t2 or {}, baselines)
+            print(f"\n🤖  Sentinel (T2): {resp_t2}")
             memory_manager.add_to_transcript("user", user_t2)
-            tts_text = resp_t2.replace("[RECOVERED]", "").strip()
-            tts.speak(tts_text)
-            # Manually add to message history and transcript
-            llm_assistant.messages.append(
-                {"role": "assistant", "content": resp_t2})
+            tts.speak(resp_t2)
+            llm_assistant.messages.append({"role": "assistant", "content": resp_t2})
             memory_manager.add_to_transcript("assistant", resp_t2)
             llm_assistant.conversation_turns += 1
+            tts.wait_until_done()
+            voice_extractor.mark_prompt_end()
 
+            # ── Turn 3 — user answers quickly and alertly ──────────────────────
+            print("\n🎤  Turn 3 — listening (answer instantly)…")
+            user_t3, audio_t3 = stt.listen(timeout=20, show_diagnostics=False)
+            if not user_t3:
+                user_t3 = "About twenty minutes left, I left around midnight."
+
+            feat_t3 = None
+            if audio_t3 is not None:
+                feat_t3 = voice_extractor.extract_features(audio_t3, user_t3)
+                if feat_t3:
+                    voice_accum.append(feat_t3)
+                    dashboard.update_voice(feat_t3)
+
+            det3 = det_thread.get_full_state()
+            score_accum.append(det3.get("drowsy_score", 0))
+            print(f"\n👤  Archit (T3): {user_t3}")
+
+            # Sentinel: "you responded instantly — you're recovered [RECOVERED]"
+            resp_t3 = build_t3_response(feat_t3 or {}, baselines)
+            print(f"\n🤖  Sentinel (T3 recovery): {resp_t3}")
+            memory_manager.add_to_transcript("user", user_t3)
+            tts_text = resp_t3.replace("[RECOVERED]", "").strip()
+            tts.speak(tts_text)
+            llm_assistant.messages.append({"role": "assistant", "content": resp_t3})
+            memory_manager.add_to_transcript("assistant", resp_t3)
+            llm_assistant.conversation_turns += 1
             tts.wait_until_done()
 
             # Show RECOVERED state briefly
