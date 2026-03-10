@@ -944,12 +944,6 @@ class DemoLLMAssistant(LLMAssistant):
             "fair project, late-night driving habit, etc.).\n"
             "  Example shape: 'Archit — [what sensors show in plain English]. "
             "Continuing from our last conversation, [profile-based question]?'\n\n"
-            "TURN 2 STRUCTURE:\n"
-            "  First: directly react to what Archit just said in Turn 1 "
-            "(show you heard him — reference his specific words or answer briefly).\n"
-            "  Then: note the improvement you can see — his eyes are more open, "
-            "voice clearer, quicker response. Keep it natural and warm.\n"
-            "  End with one short follow-up question.\n\n"
             "Do not mention PERCLOS, EAR, drowsy_score, or any raw metric names.\n"
         )
 
@@ -1145,55 +1139,22 @@ def run_conversation_phase(
                     voice_accum.append(feat_t2)
                     dashboard.update_voice(feat_t2)
 
-            det2  = det_thread.get_full_state()
+            det2 = det_thread.get_full_state()
             score_accum.append(det2.get("drowsy_score", 0))
-            dctx2 = format_detection_for_llm(
-                det2,
-                microsleep=det2.get("microsleep", False),
-                head_down=det2.get("head_down", False),
-            )
-            vctx2 = (voice_extractor.format_for_llm(feat_t2, baselines)
-                     if feat_t2 else None)
 
             print(f"\n👤  Archit (T2): {user_t2}")
-            # Real 70B LLM — responds to T1 answer + notes improvement in metrics
-            llm_assistant.get_response_streaming(
-                user_message=user_t2,
-                detection_context=dctx2,
-                voice_context=vctx2,
-            )
-            tts.wait_until_done()
-            voice_extractor.mark_prompt_end()
 
-            # ── Turn 3 — user answers quickly and alertly ──────────────────────
-            print("\n🎤  Turn 3 — listening (answer instantly)…")
-            user_t3, audio_t3 = stt.listen(timeout=20, show_diagnostics=False)
-            if not user_t3:
-                user_t3 = "About twenty minutes left, I left around midnight."
-
-            feat_t3 = None
-            if audio_t3 is not None:
-                feat_t3 = voice_extractor.extract_features(audio_t3, user_t3)
-                if feat_t3:
-                    voice_accum.append(feat_t3)
-                    dashboard.update_voice(feat_t3)
-
-            det3 = det_thread.get_full_state()
-            score_accum.append(det3.get("drowsy_score", 0))
-            print(f"\n👤  Archit (T3): {user_t3}")
-
-            # Sentinel: "you responded instantly — you're recovered [RECOVERED]"
-            resp_t3 = build_t3_response(feat_t3 or {}, baselines)
-            print(f"\n🤖  Sentinel (T3 recovery): {resp_t3}")
-            memory_manager.add_to_transcript("user", user_t3)
-            tts_text = resp_t3.replace("[RECOVERED]", "").strip()
+            # Crafted T2 response — "you sounded good → recovered" (guaranteed [RECOVERED])
+            resp_t2 = build_t3_response(feat_t2 or {}, baselines)
+            print(f"\n🤖  Sentinel (recovery): {resp_t2}")
+            memory_manager.add_to_transcript("user", user_t2)
+            tts_text = resp_t2.replace("[RECOVERED]", "").strip()
             tts.speak(tts_text)
-            llm_assistant.messages.append({"role": "assistant", "content": resp_t3})
-            memory_manager.add_to_transcript("assistant", resp_t3)
+            llm_assistant.messages.append({"role": "assistant", "content": resp_t2})
+            memory_manager.add_to_transcript("assistant", resp_t2)
             llm_assistant.conversation_turns += 1
             tts.wait_until_done()
 
-            # Show RECOVERED state briefly
             dashboard.set_state("RECOVERED")
             time.sleep(2.5)
 
