@@ -65,10 +65,10 @@ from metric_reasoner import MetricReasoner, ReasonerResult
 
 DEMO_DB_PATH            = Path(__file__).parent / "demo_sentinel.db"
 DEMO_CONFIRM_COUNT      = 2     # Confirm on 2 consecutive (not 3)
-DEMO_PRE_FILTER         = 0.18  # Fire 8B as soon as any signal appears
-DEMO_REASONER_INTERVAL  = 1.5   # Call 8B every 1.5s (vs prod 3s)
-BOOST_PERCLOS_MULT      = 2.10  # Aggressive PERCLOS amplification (always on)
-BOOST_SLOW_ADD          = 3     # Extra slow blinks (always on)
+DEMO_PRE_FILTER         = 0.40  # Slightly lower than prod 0.55 — needs real signal
+DEMO_REASONER_INTERVAL  = 2.5   # Slightly faster than prod 3s
+BOOST_PERCLOS_MULT      = 1.45  # Modest PERCLOS boost (always on silently)
+BOOST_SLOW_ADD          = 2     # Extra slow blinks (always on silently)
 
 # Window titles (stable names — never recreate unnecessarily)
 WIN_CAMERA = "Sentinel  ·  Camera Feed"
